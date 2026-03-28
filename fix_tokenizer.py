@@ -5,12 +5,11 @@ fix_tokenizer.py — Patch tokenizer_config.json after model download.
 The uploaded model has a broken tokenizer class name:
   "tokenizer_class": "TokenizersBackend"
 
-"TokenizersBackend" does not exist in transformers. The model actually uses a
-standard HuggingFace fast tokenizer (BPE via tokenizer.json). Correct class is
-"PreTrainedTokenizerFast".
-
-This causes vLLM (and raw transformers) to crash with:
-  ValueError: Tokenizer class TokenizersBackend does not exist or is not currently imported.
+Correct class for Qwen2/Qwen3 models is "Qwen2TokenizerFast".
+Using the generic "PreTrainedTokenizerFast" causes a secondary error
+because vLLM's processor checks for the Qwen2-specific class:
+  TypeError: Received CachedPreTrainedTokenizerFast but ('Qwen2Tokenizer',
+             'Qwen2TokenizerFast') was expected.
 
 This script patches the file in-place. Safe to re-run — idempotent.
 """
@@ -21,8 +20,9 @@ from pathlib import Path
 
 import yaml
 
-PROJECT = Path(__file__).parent
-CONFIG  = PROJECT / "config.yaml"
+PROJECT  = Path(__file__).parent
+CONFIG   = PROJECT / "config.yaml"
+GOOD_CLS = "Qwen2TokenizerFast"
 
 
 def main():
@@ -33,16 +33,16 @@ def main():
     if not tok_cfg.exists():
         sys.exit(f"ERROR: {tok_cfg} not found. Run: python download_model.py")
 
-    data = json.loads(tok_cfg.read_text())
+    data    = json.loads(tok_cfg.read_text())
     current = data.get("tokenizer_class", "(not set)")
 
-    if current == "PreTrainedTokenizerFast":
+    if current == GOOD_CLS:
         print(f"tokenizer_config.json already correct ({current}). Nothing to do.")
         return
 
-    data["tokenizer_class"] = "PreTrainedTokenizerFast"
+    data["tokenizer_class"] = GOOD_CLS
     tok_cfg.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    print(f"Patched tokenizer_class: {current!r} → 'PreTrainedTokenizerFast'")
+    print(f"Patched tokenizer_class: {current!r} → {GOOD_CLS!r}")
     print(f"File: {tok_cfg}")
 
 
