@@ -1,0 +1,37 @@
+# Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled — RTX PRO 6000 Blackwell (96 GB VRAM)
+# ---------------------------------------------------------------
+# 96 GB VRAM → run full bf16, no quantization needed.
+# Model is ~19 GB bf16 — fits easily with 77 GB to spare.
+#
+# Quantization options (only needed on smaller GPUs):
+#   none (bf16): ~19 GB  ← current, best quality
+#   8bit:        ~10 GB
+#   4bit:        ~5 GB
+# ---------------------------------------------------------------
+
+model:
+  hf_repo: "Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled"
+  local_dir: "/home/scratch.yihwang_gpu_1/small_model/models/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled"
+
+  # Full bf16 — no quality loss, 96 GB VRAM has plenty of headroom
+  quantization: "8bit"
+
+  # dtype: bfloat16 is native for Blackwell and preferred
+  torch_dtype: "bfloat16"
+
+  # Device map — "auto" puts everything on the single GPU
+  device_map: "auto"
+
+generation:
+  # Context: model supports up to 16 384 tokens
+  max_new_tokens: 2048
+
+  # Qwen3.5 recommended sampling params
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 40
+  repetition_penalty: 1.05
+  do_sample: true
+
+  # Stop token (ChatML)
+  # Handled automatically by the model's chat template

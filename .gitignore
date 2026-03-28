@@ -1,0 +1,34 @@
+# Model weights (large binary files)
+models/
+*.bin
+*.safetensors
+*.gguf
+*.ggml
+
+# Python virtual environment
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Logs and temp files
+*.log
+*.pid
+*.tmp
+nohup.out
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
