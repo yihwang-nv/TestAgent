@@ -75,6 +75,13 @@ else
     }
 fi
 
+# ── 4b. Patch tokenizer_config.json ──────────────────────────────────────────
+# The uploaded model has "tokenizer_class": "TokenizersBackend" which doesn't
+# exist in transformers. Patch it to "PreTrainedTokenizerFast" (correct class).
+echo ""
+echo "[4b] Patching tokenizer_config.json..."
+python "$PROJECT_DIR/fix_tokenizer.py" && echo "  Done." || echo "  Skipped (model not yet downloaded)."
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "======================================================"
