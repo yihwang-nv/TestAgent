@@ -1,14 +1,7 @@
-# ── Core inference (local model) ──────────────────────────────────────────────
-torch>=2.5.0
-transformers>=4.47.0
-accelerate>=0.34.0
-bitsandbytes>=0.43.0      # 4-bit / 8-bit quantization
-
-# ── Inference server ──────────────────────────────────────────────────────────
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
-sse-starlette>=2.1.0
-pydantic>=2.7.0
+# ── Inference engine ──────────────────────────────────────────────────────────
+# vLLM bundles its own torch, transformers, fastapi, uvicorn, etc.
+# Do NOT install torch/transformers separately — version conflicts will occur.
+vllm>=0.6.0
 
 # ── HTTP client (agent ↔ local server) ───────────────────────────────────────
 httpx>=0.27.0

@@ -13,12 +13,13 @@ SKIP_DOWNLOAD=false
 
 echo "======================================================"
 echo " Qwen3.5-9B Reasoning Distilled — Project Setup"
+echo " Inference engine: vLLM"
 echo " Workspace: $PROJECT_DIR"
 echo "======================================================"
 
 # ── 1. GPU check ──────────────────────────────────────────────────────────────
 echo ""
-echo "[1/5] Checking GPU..."
+echo "[1/4] Checking GPU..."
 if ! command -v nvidia-smi &>/dev/null; then
     echo "  ERROR: nvidia-smi not found. Install NVIDIA drivers first."
     exit 1
@@ -26,9 +27,12 @@ fi
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader \
     | awk '{print "  GPU: "$0}'
 
+CUDA_VER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
+echo "  Driver: $CUDA_VER"
+
 # ── 2. Python venv ────────────────────────────────────────────────────────────
 echo ""
-echo "[2/5] Setting up Python virtual environment..."
+echo "[2/4] Setting up Python virtual environment..."
 if [[ -d "$VENV_DIR" ]]; then
     echo "  Already exists: $VENV_DIR (skipping creation)"
 else
@@ -38,30 +42,32 @@ fi
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip wheel --quiet
 
-# ── 3. PyTorch (CUDA 12.8 — Blackwell SM_100) ────────────────────────────────
+# ── 3. Install vLLM + project dependencies ────────────────────────────────────
+# NOTE: vLLM bundles its own torch, transformers, fastapi, uvicorn.
+#       Do NOT install torch separately — it will cause version conflicts.
 echo ""
-echo "[3/5] Installing PyTorch for CUDA 12.8 (Blackwell RTX 5070 / SM_100)..."
-if python -c "import torch; assert torch.cuda.is_available()" &>/dev/null; then
-    echo "  PyTorch with CUDA already installed — skipping"
-else
-    pip install torch torchvision torchaudio \
-        --index-url https://download.pytorch.org/whl/cu128 --quiet
-    echo "  Done."
+echo "[3/4] Installing vLLM and dependencies..."
+echo "  (vLLM is large — first install may take a few minutes)"
+
+# Check if we're on a Blackwell GPU (sm_100) — needs vLLM >= 0.6
+GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
+if echo "$GPU_NAME" | grep -qiE "RTX (50|PRO 6000 Blackwell)"; then
+    echo "  Detected Blackwell GPU ($GPU_NAME) — ensuring vLLM >= 0.6.0"
 fi
 
-# ── 4. Project dependencies ───────────────────────────────────────────────────
-echo ""
-echo "[4/5] Installing project dependencies..."
 pip install -r "$PROJECT_DIR/requirements.txt" --quiet
 echo "  Done."
 
-# ── 5. Download model ─────────────────────────────────────────────────────────
+# Verify vllm installed
+python -c "import vllm; print(f'  vLLM {vllm.__version__} installed')"
+
+# ── 4. Download model ─────────────────────────────────────────────────────────
 echo ""
 if $SKIP_DOWNLOAD; then
-    echo "[5/5] Skipping model download (--skip-download passed)."
+    echo "[4/4] Skipping model download (--skip-download passed)."
     echo "      Run manually: python download_model.py"
 else
-    echo "[5/5] Downloading model (~19 GB — Ctrl-C to skip and do it later)..."
+    echo "[4/4] Downloading model (~19 GB — Ctrl-C to skip and do it later)..."
     python "$PROJECT_DIR/download_model.py" || {
         echo ""
         echo "  Download interrupted or failed."
@@ -76,9 +82,11 @@ echo " Setup complete!"
 echo "======================================================"
 echo ""
 echo " Next:"
-echo "   bash start_server.sh        # start inference server"
+echo "   bash start_server.sh        # start vLLM inference server"
 echo "   bash start_agent.sh         # start agent REPL (new terminal)"
 echo ""
-echo " Quantization (edit config.yaml → model.quantization):"
-echo "   4bit  ~5  GB VRAM  ← default"
-echo "   8bit  ~10 GB VRAM  ← better quality"
+echo " Quantization options (edit config.yaml → model.quantization):"
+echo "   none  ~19 GB VRAM  ← default (full bf16, best quality)"
+echo "   8bit  ~10 GB VRAM  (bitsandbytes, --quant 8bit)"
+echo "   awq   ~5  GB VRAM  (needs pre-quantized AWQ model variant)"
+echo ""

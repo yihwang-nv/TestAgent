@@ -1,29 +1,42 @@
 # Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled — RTX PRO 6000 Blackwell (96 GB VRAM)
 # ---------------------------------------------------------------
-# 96 GB VRAM → run full bf16, no quantization needed.
-# Model is ~19 GB bf16 — fits easily with 77 GB to spare.
+# Inference engine: vLLM (PagedAttention, continuous batching)
+# Model is ~19 GB bf16 — fits easily on 96 GB VRAM.
 #
 # Quantization options (only needed on smaller GPUs):
-#   none (bf16): ~19 GB  ← current, best quality
-#   8bit:        ~10 GB
-#   4bit:        ~5 GB
+#   none (bf16): ~19 GB  ← default, best quality
+#   8bit:        ~10 GB  (vLLM bitsandbytes)
+#   awq:         ~5  GB  (needs pre-quantized AWQ variant)
 # ---------------------------------------------------------------
 
 model:
   hf_repo: "Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled"
   local_dir: "/home/scratch.yihwang_gpu_1/small_model/models/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled"
 
-  # Full bf16 — no quality loss, 96 GB VRAM has plenty of headroom
-  quantization: "8bit"
+  # Quantization: "none" | "8bit" | "awq"
+  quantization: "none"
 
   # dtype: bfloat16 is native for Blackwell and preferred
   torch_dtype: "bfloat16"
 
-  # Device map — "auto" puts everything on the single GPU
-  device_map: "auto"
+vllm:
+  # Max context length (model supports up to 32 768; set lower to save KV cache)
+  max_model_len: 8192
+
+  # Fraction of GPU VRAM to allocate for model + KV cache (0.0–1.0)
+  gpu_memory_utilization: 0.90
+
+  # Number of GPUs for tensor parallelism (1 for single GPU)
+  tensor_parallel_size: 1
+
+  # Name exposed on /v1/models
+  served_model_name: "qwen3.5-9b"
+
+  # Trust remote code (required for Qwen3 chat template)
+  trust_remote_code: true
 
 generation:
-  # Context: model supports up to 16 384 tokens
+  # Context: capped by vllm.max_model_len above
   max_new_tokens: 2048
 
   # Qwen3.5 recommended sampling params
@@ -31,7 +44,3 @@ generation:
   top_p: 0.95
   top_k: 40
   repetition_penalty: 1.05
-  do_sample: true
-
-  # Stop token (ChatML)
-  # Handled automatically by the model's chat template
