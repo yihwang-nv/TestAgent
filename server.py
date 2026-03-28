@@ -51,6 +51,7 @@ def main() -> None:
         "--host",                     args.host,
         "--port",                     str(args.port),
         "--trust-remote-code",
+        "--tokenizer-mode", "slow",   # avoids TokenizersBackend class error
     ]
 
     if quant == "8bit":

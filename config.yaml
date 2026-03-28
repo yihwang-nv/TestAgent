@@ -35,6 +35,26 @@ vllm:
   # Trust remote code (required for Qwen3 chat template)
   trust_remote_code: true
 
+tensorrt_llm:
+  # Directory where the compiled TRT-LLM engine is saved/loaded.
+  # Default (if blank): <project>/engines/qwen3.5-9b-<quant>-<dtype>/
+  engine_dir: ""
+
+  # Max sequence length for engine compilation
+  max_seq_len: 8192
+
+  # Max concurrent requests during inference
+  max_batch_size: 8
+
+  # Number of GPUs for tensor parallelism (1 for single GPU)
+  tensor_parallel_size: 1
+
+  # Quantization for TRT-LLM (independent of vLLM quant above):
+  #   none      — bf16 full precision (~19 GB VRAM)
+  #   int8      — SmoothQuant W8A8   (~10 GB VRAM)
+  #   int4_awq  — AWQ W4A16          (~5  GB VRAM, fastest)
+  quantization: "none"
+
 generation:
   # Context: capped by vllm.max_model_len above
   max_new_tokens: 2048

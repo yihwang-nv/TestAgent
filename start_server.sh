@@ -75,6 +75,10 @@ VLLM_ARGS=(
     --port           "$PORT"
     --host           "0.0.0.0"
     --trust-remote-code
+    # Use the slow (Python) tokenizer to avoid "TokenizersBackend does not exist"
+    # errors that occur when the model's tokenizer_config.json references a fast
+    # tokenizer class not bundled with this version of vLLM/transformers.
+    --tokenizer-mode slow
 )
 
 # Quantization

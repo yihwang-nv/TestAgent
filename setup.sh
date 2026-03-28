@@ -55,7 +55,7 @@ if echo "$GPU_NAME" | grep -qiE "RTX (50|PRO 6000 Blackwell)"; then
     echo "  Detected Blackwell GPU ($GPU_NAME) — ensuring vLLM >= 0.6.0"
 fi
 
-pip install -r "$PROJECT_DIR/requirements.txt" --quiet
+pip install -r "$PROJECT_DIR/requirements.txt" #--quiet
 echo "  Done."
 
 # Verify vllm installed
