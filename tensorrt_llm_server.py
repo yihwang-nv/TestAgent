@@ -120,6 +120,7 @@ def load_model(c: dict, quant: str) -> tuple["LLM", AutoTokenizer]:
         model=str(model_dir),
         dtype=dtype,
         tensor_parallel_size=tp_size,
+        trust_remote_code=True,
         **( {"quant_config": quant_cfg} if quant_cfg else {} ),
     )
     log.info("Model loaded.")
