@@ -75,7 +75,12 @@ def _engine_dir(c: dict, quant: str) -> Path:
     return PROJECT / "engines" / f"qwen3.5-9b-{quant}-{dtype}"
 
 
-def _quant_config(quant: str) -> QuantConfig | None:
+def _quant_config(quant: str):
+    if QuantConfig is None or QuantAlgo is None:
+        if quant in ("int8", "int4_awq"):
+            print(f"WARNING: QuantConfig unavailable — running without quantization "
+                  f"(requested: {quant})", file=sys.stderr)
+        return None
     match quant:
         case "int8":
             return QuantConfig(quant_algo=QuantAlgo.W8A8_SQ_PER_CHANNEL)

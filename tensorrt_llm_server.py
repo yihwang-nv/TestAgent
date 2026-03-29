@@ -106,9 +106,12 @@ def _engine_dir(c: dict, quant: str) -> Path:
     return PROJECT / "engines" / f"qwen3.5-9b-{quant}-{dtype}"
 
 
-def _quant_config(quant: str) -> Optional["QuantConfig"]:
+def _quant_config(quant: str):
     """Return TRT-LLM QuantConfig for the requested scheme, or None for bf16."""
-    if not _TRTLLM_AVAILABLE:
+    if not _TRTLLM_AVAILABLE or QuantConfig is None or QuantAlgo is None:
+        if quant in ("int8", "int4_awq"):
+            log.warning("QuantConfig unavailable — running without quantization "
+                        "(requested: %s)", quant)
         return None
     match quant:
         case "int8":
