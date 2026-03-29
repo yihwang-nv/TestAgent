@@ -27,16 +27,41 @@ from pathlib import Path
 
 import yaml
 
+# ── TRT-LLM imports — try multiple paths; API moved between 0.x and 1.x ──────
+_errs = []
+
 try:
     from tensorrt_llm import LLM
-    from tensorrt_llm.llm import BuildConfig
+except Exception as e:
+    _errs.append(f"  tensorrt_llm.LLM: {e}")
+    LLM = None  # type: ignore
+
+# BuildConfig: root package in 1.x, .llm submodule in 0.x
+try:
+    from tensorrt_llm import BuildConfig
+except Exception:
+    try:
+        from tensorrt_llm.llm import BuildConfig
+    except Exception as e:
+        _errs.append(f"  BuildConfig: {e}")
+        BuildConfig = None  # type: ignore
+
+# QuantConfig / QuantAlgo: .quantization in both versions; fallback to root
+try:
     from tensorrt_llm.quantization import QuantConfig, QuantAlgo
-except (ImportError, Exception):
-    sys.exit(
-        "ERROR: tensorrt_llm is not installed.\n"
-        "       pip install tensorrt-llm\n"
-        "       (requires CUDA ≥ 12.1, driver ≥ 525, Ampere/Hopper/Blackwell GPU)"
-    )
+except Exception:
+    try:
+        from tensorrt_llm import QuantConfig, QuantAlgo
+    except Exception as e:
+        _errs.append(f"  QuantConfig/QuantAlgo: {e}")
+        QuantConfig = QuantAlgo = None  # type: ignore
+
+if LLM is None or BuildConfig is None:
+    print("ERROR: tensorrt_llm failed to import required classes:", file=sys.stderr)
+    for e in _errs:
+        print(e, file=sys.stderr)
+    print("\nInstall: pip install tensorrt-llm", file=sys.stderr)
+    sys.exit(1)
 
 PROJECT = Path(__file__).parent
 CONFIG  = PROJECT / "config.yaml"

@@ -47,19 +47,37 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from transformers import AutoTokenizer
 
-# ── TensorRT-LLM imports ──────────────────────────────────────────────────────
-# These are only available if tensorrt_llm is installed.
+# ── TRT-LLM imports — try multiple paths; API moved between 0.x and 1.x ──────
 # Install: pip install tensorrt-llm  (requires CUDA ≥ 12.1, driver ≥ 525)
+_trtllm_import_errors: list[str] = []
+
 try:
     from tensorrt_llm import LLM, SamplingParams
-    from tensorrt_llm.llm import BuildConfig
+except Exception as e:
+    _trtllm_import_errors.append(f"  LLM/SamplingParams: {e}")
+    LLM = SamplingParams = None  # type: ignore
+
+# BuildConfig: root package in 1.x, .llm submodule in 0.x
+try:
+    from tensorrt_llm import BuildConfig
+except Exception:
+    try:
+        from tensorrt_llm.llm import BuildConfig
+    except Exception as e:
+        _trtllm_import_errors.append(f"  BuildConfig: {e}")
+        BuildConfig = None  # type: ignore
+
+# QuantConfig / QuantAlgo: .quantization in both; fallback to root
+try:
     from tensorrt_llm.quantization import QuantConfig, QuantAlgo
-    _TRTLLM_AVAILABLE = True
-except (ImportError, Exception):
-    # Catch broad Exception: modelopt's vllm-plugin import failure raises a
-    # non-fatal UserWarning at import time but the actual TRT-LLM classes may
-    # still be available. If the specific classes above fail, mark unavailable.
-    _TRTLLM_AVAILABLE = False
+except Exception:
+    try:
+        from tensorrt_llm import QuantConfig, QuantAlgo
+    except Exception as e:
+        _trtllm_import_errors.append(f"  QuantConfig/QuantAlgo: {e}")
+        QuantConfig = QuantAlgo = None  # type: ignore
+
+_TRTLLM_AVAILABLE = (LLM is not None and BuildConfig is not None)
 
 PROJECT    = Path(__file__).parent
 CONFIG     = PROJECT / "config.yaml"
@@ -378,11 +396,11 @@ def main():
     args = parser.parse_args()
 
     if not _TRTLLM_AVAILABLE:
-        sys.exit(
-            "ERROR: tensorrt_llm is not installed.\n"
-            "       pip install tensorrt-llm\n"
-            "       (requires CUDA ≥ 12.1, driver ≥ 525, sm_80+)"
-        )
+        print("ERROR: tensorrt_llm classes failed to import:", file=sys.stderr)
+        for e in _trtllm_import_errors:
+            print(e, file=sys.stderr)
+        print("\nInstall: pip install tensorrt-llm", file=sys.stderr)
+        sys.exit(1)
 
     c     = _load_cfg()
     quant = args.quant or c["model"].get("quantization", "none")
