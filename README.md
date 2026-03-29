@@ -54,7 +54,12 @@ bash start_claude_agent.sh "explain server.py"
 ## Optional environment variables
 
 - `GPU_SELECT_MAX_MODEL_LEN` — force vLLM `--max-model-len` (OOM risk if too high).
+- `VLLM_TOOL_CALL_PARSER` — override `config.yaml` `vllm.tool_call_parser` (e.g. `qwen3_xml` for Qwen3.5 XML tools).
 - `AGENT_ASSUMED_MAX_MODEL_LEN`, `AGENT_MAX_TOOL_CHARS`, `AGENT_MIN_COMPLETION_TOKENS`, … — see `claude_agent.py` / comments there.
+
+## Troubleshooting
+
+- **vLLM logs `hermes_tool_parser.py` + `JSONDecodeError` on tool calls** — The running server is using the **Hermes** parser (expects JSON inside `<tool_call>`). For Qwen3.5 XML tools, stop the process and restart with **`bash start_server.sh`** so `--tool-call-parser qwen3_xml` is applied, or run `VLLM_TOOL_CALL_PARSER=qwen3_xml bash start_server.sh`. Confirm the banner line `tool_parser : qwen3_xml` before serving traffic.
 
 ## License
 

@@ -41,7 +41,10 @@ def main() -> None:
 
     cfg = yaml.safe_load((PROJECT_DIR / "config.yaml").read_text())
     vllm_cfg = cfg.get("vllm") or {}
-    tool_call_parser = str(vllm_cfg.get("tool_call_parser") or "hermes").strip()
+    tool_call_parser = str(vllm_cfg.get("tool_call_parser") or "qwen3_xml").strip()
+    if os.environ.get("VLLM_TOOL_CALL_PARSER", "").strip():
+        tool_call_parser = os.environ["VLLM_TOOL_CALL_PARSER"].strip()
+        print(f"NOTE: VLLM_TOOL_CALL_PARSER override → tool_call_parser={tool_call_parser}")
     r = resolve_model_config(
         args.model_size.lower(),
         args.quant.lower(),

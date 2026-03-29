@@ -9,6 +9,7 @@
 # vLLM (.venv): none / 8bit / awq
 # TensorRT-LLM (.venv_trtllm, setup_trtllm.sh): none / 4bit / 8bit / awq (+ tensorrt_llm.* in config.yaml)
 # Optional: GPU_SELECT_MAX_MODEL_LEN=8192  覆盖 gpu_select 按显存推算的 --max-model-len（OOM 风险自负）
+# Optional: VLLM_TOOL_CALL_PARSER=qwen3_xml  强制工具解析器（覆盖 config.yaml；日志若出现 hermes_tool_parser 说明曾用错解析器）
 # =============================================================================
 set -euo pipefail
 
@@ -36,17 +37,22 @@ fi
 # shellcheck source=/dev/null
 source "$VENV_VLLM"
 
-# Must match config.yaml vllm.tool_call_parser (server.py already reads YAML; this script used to hardcode hermes).
+# Must match config.yaml vllm.tool_call_parser (server.py already reads YAML).
 TOOL_CALL_PARSER="$(python -c "
 import pathlib
 try:
     import yaml
     cfg = yaml.safe_load((pathlib.Path('${PROJECT_DIR}') / 'config.yaml').read_text())
-    p = str((cfg.get('vllm') or {}).get('tool_call_parser') or 'hermes').strip()
-    print(p or 'hermes')
+    p = str((cfg.get('vllm') or {}).get('tool_call_parser') or 'qwen3_xml').strip()
+    print(p or 'qwen3_xml')
 except Exception:
-    print('hermes')
+    print('qwen3_xml')
 ")"
+
+if [[ -n "${VLLM_TOOL_CALL_PARSER:-}" ]]; then
+    TOOL_CALL_PARSER="${VLLM_TOOL_CALL_PARSER}"
+    echo "NOTE: VLLM_TOOL_CALL_PARSER override → tool_call_parser=$TOOL_CALL_PARSER"
+fi
 
 GPU_CMD=(python "$PROJECT_DIR/gpu_select.py" --model-size "$MODEL_SIZE" --quant "$QUANT")
 [[ -n "$ENGINE_CLI" ]] && GPU_CMD+=(--engine "$ENGINE_CLI")

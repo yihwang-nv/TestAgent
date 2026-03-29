@@ -108,7 +108,7 @@ Guidelines:
 - Be concise and direct. Show code changes, not lengthy explanations.
 - **ReAct (Thought → Action → Observation)**: On multi-step tasks, **before** each batch of tool calls write a short
   block starting with `Thought:` (1–4 sentences): what you know, what is still missing, and why the next tool(s)
-  are appropriate. Your `<tool_call>` JSON is **Action**. The following messages that carry tool results are
+  are appropriate. Your `<tool_call>` blocks are **Action**. The following messages that carry tool results are
   **Observation** — read them, then either another `Thought:` and more tools, or a final answer to the user.
   For trivial one-shot replies **without** tools, omit `Thought:`.
 - **Before read_file**: call **file_stat** first on paths you have not inspected yet. If the file is large,
@@ -122,14 +122,26 @@ Guidelines:
   If **file_stat** says not found, **do not** tweak the path by guess — widen **glob_search** or ask the user.
 - **grep_search**: small/medium jobs return matches inline. If the searched file is large or there are
   many hits, results are written to a temp file; read that file in chunks with read_file(offset, limit).
-- **Tool calls (local vLLM, Hermes / tool_call_parser=hermes)**: Each call is **one JSON object** inside
-  `<tool_call>…</tool_call>`. Shape: `{{"name": "<tool_name>", "arguments": {{ ... }}}}` — **valid JSON only**
-  (double-quoted keys/strings, no trailing commas, escape newlines inside strings as `\\n`). Wrong: qwen3_xml
-  blocks like `<function=glob_search><parameter=…>` — do not use those here. Example (copy shape; use real names/args):
+- **Tool calls (local vLLM, qwen3_xml)**: Each call is **nested XML** inside `<tool_call>…</tool_call>`, **not**
+  Hermes JSON. Wrong: `<tool_call> {{"name":"glob_search",…}} </tool_call>`. Right (shape to copy):
   `<tool_call>`
-  `{{"name": "glob_search", "arguments": {{"pattern": "**/attentionOp.cpp", "directory": "/absolute/or/cwd-relative/root"}}}}`
+  `<function=glob_search>`
+  `<parameter=pattern>**/attentionOp.cpp</parameter>`
+  `<parameter=directory>/absolute/or/cwd-relative/root</parameter>`
+  `</function>`
   `</tool_call>`
-  Close `</tool_call>` before normal user-facing text. Multiple tools → multiple `<tool_call>` blocks.
+  You **must** emit `</function>` before `</tool_call>` (put `</function>` and `</tool_call>` on their own lines if unsure).
+  Wrong: `<tool_call> <function=foo> <parameter=x>y </tool_call>` (missing `</function>` — server often ignores the call).
+  One `<parameter=…>…</parameter>` per argument; values plain text. After `<tool_call>` use
+  `<function=` next, not `{{`. Close `</function></tool_call>` before normal prose. Multiple tools → multiple `<tool_call>` blocks.
+- **Tool names are fixed**: Call **only** tools from the API schema — e.g. `file_stat`, `read_file`, `write_file`,
+  `str_replace`, `shell`, `glob_search`, `grep_search`, `list_directory`, and `kb_*` when `--kb` is on.
+  **Never** invent tools such as `greet_user`, `chat`, `respond`, or `answer_user`; they will fail.
+- **Exact `<function=` syntax**: The token after `=` must be **only** the tool id, then `>` — e.g. `<function=read_file>`.
+  **Wrong:** `<function=Read me`, `<function=Read`, `<function=ReadFile` (human phrases / wrong ids / missing `>`).
+  To read a file use **`read_file`** with `<parameter=path>…</parameter>`, not a tool named `Read`.
+- **No tool for small talk**: Greetings, thanks, and short answers should be **plain text only** with **no**
+  `<tool_call>` wrapper. Use tools only for filesystem, search, shell, or knowledge-base actions.
 - When editing files, read the relevant region (with offset/limit) before write_file or str_replace.
 - **Tool errors**: If a tool message starts with `Error:` or describes a missing/invalid argument, **you** fix it:
   read the error, adjust parameters (e.g. correct `path` from glob_search), and call the tool again in the
@@ -1060,6 +1072,128 @@ TOOL_DISPATCH = {
     "kb_remember":    lambda args: tool_kb_remember(args.get("text") or "", args.get("title")),
 }
 
+AGENT_TOOL_NAMES = frozenset(TOOL_DISPATCH.keys())
+
+
+def _parse_qwen3_xml_tool_calls(content: str) -> Optional[tuple[str, list[dict]]]:
+    """
+    When vLLM's qwen3_xml parser yields no tool_calls (e.g. missing </function> or </parameter>), recover
+    <function=name> and <parameter=key>… values inside each <tool_call>…</tool_call> block.
+    """
+    if not content or "<tool_call>" not in content or "<function=" not in content.lower():
+        return None
+    prefix = content[: content.find("<tool_call>")].strip()
+    specs: list[dict] = []
+    i = 0
+    while True:
+        s = content.find("<tool_call>", i)
+        if s < 0:
+            break
+        e = content.find("</tool_call>", s)
+        if e < 0:
+            inner = content[s + len("<tool_call>") :].strip()
+            i = len(content)
+        else:
+            inner = content[s + len("<tool_call>") : e].strip()
+            i = e + len("</tool_call>")
+        fm = re.search(r"<function\s*=\s*([\w.-]+)\s*>", inner, re.I)
+        if not fm:
+            if e < 0:
+                break
+            continue
+        name = fm.group(1).strip()
+        if name not in AGENT_TOOL_NAMES:
+            if e < 0:
+                break
+            continue
+        rest = inner[fm.end() :]
+        args: dict[str, str] = {}
+        for pm in re.finditer(
+            r"<parameter\s*=\s*([\w.-]+)\s*>([\s\S]*?)(?=</parameter>|</function>|</tool_call>|<parameter\s*=|\Z)",
+            rest,
+            re.I,
+        ):
+            k = pm.group(1).strip()
+            v = pm.group(2).strip()
+            if v.endswith("</parameter>"):
+                v = v[: -len("</parameter>")].strip()
+            args[k] = v
+        specs.append(
+            {
+                "id": f"fallback_{uuid.uuid4().hex[:20]}",
+                "name": name,
+                "arguments": args,
+            }
+        )
+        if e < 0:
+            break
+    if not specs:
+        return None
+    return prefix, specs
+
+
+def _parse_hermes_json_tool_calls(content: str) -> Optional[tuple[str, list[dict]]]:
+    """
+    When vLLM returns no tool_calls (e.g. model emitted Hermes JSON instead of qwen3_xml), extract Hermes-style
+    JSON inside <tool_call>…</tool_call>. Returns (prefix_text, [{id,name,arguments}, ...]).
+    """
+    if not content or "<tool_call>" not in content:
+        return None
+    prefix = content[: content.find("<tool_call>")].strip()
+    specs: list[dict] = []
+    i = 0
+    while True:
+        s = content.find("<tool_call>", i)
+        if s < 0:
+            break
+        e = content.find("</tool_call>", s)
+        if e < 0:
+            inner = content[s + len("<tool_call>") :].strip()
+            i = len(content)
+        else:
+            inner = content[s + len("<tool_call>") : e].strip()
+            i = e + len("</tool_call>")
+        if not inner.startswith("{"):
+            if e < 0:
+                break
+            continue
+        try:
+            data = json.loads(inner)
+        except json.JSONDecodeError:
+            if e < 0:
+                break
+            continue
+        name = data.get("name")
+        if not isinstance(name, str) or not name.strip():
+            if e < 0:
+                break
+            continue
+        name = name.strip()
+        if name not in AGENT_TOOL_NAMES:
+            if e < 0:
+                break
+            continue
+        args = data.get("arguments", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args.strip() else {}
+            except json.JSONDecodeError:
+                args = {}
+        if not isinstance(args, dict):
+            args = {}
+        specs.append(
+            {
+                "id": f"fallback_{uuid.uuid4().hex[:20]}",
+                "name": name,
+                "arguments": args,
+            }
+        )
+        if e < 0:
+            break
+    if not specs:
+        return None
+    return prefix, specs
+
 
 def _user_confirm(summary: str) -> bool:
     console.print(f"\n[bold yellow]Confirmation required[/bold yellow]\n{summary}")
@@ -1230,7 +1364,15 @@ def _exec_tool(name: str, args: dict) -> str:
 
     if name == "write_file":
         p = args.get("path", "")
-        exists = _resolve(p).exists() if p else False
+        content = args.get("content")
+        if not (isinstance(p, str) and p.strip()) or not isinstance(content, str):
+            result = (
+                "Error: write_file needs non-empty `path` and string `content`. "
+                "The model emitted an incomplete tool call — retry with full file path and body."
+            )
+            render_tool_result(result, tool_label=name)
+            return result
+        exists = _resolve(p).exists()
         summ = f"write_file → {p!r} ({'overwrite' if exists else 'create'})"
         if not _user_confirm(summ):
             result = "User declined: write_file was not executed."
@@ -1239,6 +1381,22 @@ def _exec_tool(name: str, args: dict) -> str:
 
     if name == "str_replace":
         p = args.get("path", "")
+        old_s = args.get("old_string")
+        new_s = args.get("new_string")
+        if not (isinstance(p, str) and p.strip()):
+            result = (
+                "Error: str_replace needs non-empty `path`, plus `old_string` and `new_string`. "
+                "The model emitted an empty or incomplete tool call — retry the edit with explicit parameters."
+            )
+            render_tool_result(result, tool_label=name)
+            return result
+        if not isinstance(old_s, str) or not isinstance(new_s, str):
+            result = (
+                f"Error: str_replace needs string `old_string` and `new_string` "
+                f"(got old_string={old_s!r}, new_string={new_s!r})."
+            )
+            render_tool_result(result, tool_label=name)
+            return result
         summ = f"str_replace → {p!r} (in-place edit)"
         if not _user_confirm(summ):
             result = "User declined: str_replace was not executed."
@@ -1297,64 +1455,6 @@ def _clamp_openai_max_tokens(sys_msg: dict, messages: list[dict], requested_max:
         room_relaxed = ctx - relaxed_prompt - slack
         room_eff = max(floor, room, room_relaxed)
     return max(1, min(req, room_eff))
-
-
-def _parse_hermes_json_tool_calls(content: str) -> Optional[tuple[str, list[dict]]]:
-    """
-    When vLLM returns no tool_calls (e.g. hermes parse failed on malformed JSON), extract Hermes-style
-    JSON inside <tool_call>…</tool_call>. Returns (prefix_text, [{id,name,arguments}, ...]).
-    """
-    if not content or "<tool_call>" not in content:
-        return None
-    prefix = content[: content.find("<tool_call>")].strip()
-    specs: list[dict] = []
-    i = 0
-    while True:
-        s = content.find("<tool_call>", i)
-        if s < 0:
-            break
-        e = content.find("</tool_call>", s)
-        if e < 0:
-            inner = content[s + len("<tool_call>") :].strip()
-            i = len(content)
-        else:
-            inner = content[s + len("<tool_call>") : e].strip()
-            i = e + len("</tool_call>")
-        if not inner.startswith("{"):
-            if e < 0:
-                break
-            continue
-        try:
-            data = json.loads(inner)
-        except json.JSONDecodeError:
-            if e < 0:
-                break
-            continue
-        name = data.get("name")
-        if not isinstance(name, str) or not name.strip():
-            if e < 0:
-                break
-            continue
-        args = data.get("arguments", {})
-        if isinstance(args, str):
-            try:
-                args = json.loads(args) if args.strip() else {}
-            except json.JSONDecodeError:
-                args = {}
-        if not isinstance(args, dict):
-            args = {}
-        specs.append(
-            {
-                "id": f"fallback_{uuid.uuid4().hex[:20]}",
-                "name": name.strip(),
-                "arguments": args,
-            }
-        )
-        if e < 0:
-            break
-    if not specs:
-        return None
-    return prefix, specs
 
 
 def _openai_context_length_error(exc: BaseException) -> bool:
@@ -1433,17 +1533,24 @@ def run_turn_openai(
         api_tcs = msg.tool_calls or []
         text_out = text_full
         fallback_specs: list[dict] | None = None
-        if (
-            not api_tcs
-            and text_full
-            and os.environ.get("AGENT_DISABLE_HERMES_FALLBACK", "").strip() != "1"
-        ):
-            parsed = _parse_hermes_json_tool_calls(text_full)
-            if parsed:
-                text_out, fallback_specs = parsed
-                console.print(
-                    "[dim]已用客户端回退解析 <tool_call> 内 JSON（服务端未返回 tool_calls）[/dim]"
-                )
+        if not api_tcs and text_full:
+            if os.environ.get("AGENT_DISABLE_QWEN_XML_FALLBACK", "").strip() != "1":
+                parsed = _parse_qwen3_xml_tool_calls(text_full)
+                if parsed:
+                    text_out, fallback_specs = parsed
+                    console.print(
+                        "[dim]已用客户端回退解析 qwen3_xml 式 <tool_call>（服务端未返回 tool_calls）[/dim]"
+                    )
+            if (
+                fallback_specs is None
+                and os.environ.get("AGENT_DISABLE_HERMES_FALLBACK", "").strip() != "1"
+            ):
+                parsed = _parse_hermes_json_tool_calls(text_full)
+                if parsed:
+                    text_out, fallback_specs = parsed
+                    console.print(
+                        "[dim]已用客户端回退解析 <tool_call> 内 JSON（服务端未返回 tool_calls）[/dim]"
+                    )
 
         assistant_msg: dict = {"role": "assistant", "content": text_out}
         if api_tcs:

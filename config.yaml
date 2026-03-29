@@ -26,9 +26,10 @@ models:
     local_dir: "models/Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled"
     size_gb_bf16: 9
     served_model_name: "qwen3.5-4b"
+  # Official Qwen3.5-9B (chat/instruct); pair with vllm.tool_call_parser: qwen3_xml for native-style tools.
   "9b":
-    hf_repo: "Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled"
-    local_dir: "models/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled"
+    hf_repo: "Qwen/Qwen3.5-9B"
+    local_dir: "models/Qwen3.5-9B"
     size_gb_bf16: 19
     served_model_name: "qwen3.5-9b"
   "27b":
@@ -43,7 +44,7 @@ models:
     served_model_name: "qwen3.5-35b-a3b"
 
 # chat.py (transformers) uses this key under models:
-chat_model_size: "4b"
+chat_model_size: "9b"
 
 vllm:
   # 上限；实际长度 = min(本值, gpu_select 按显存档位)。须 ≤ 模型 config.json 的 max_position_embeddings。
@@ -52,9 +53,9 @@ vllm:
   gpu_memory_utilization: 0.95
   tensor_parallel_size: 1
   trust_remote_code: true
-  # 工具调用解析：本项目默认 hermes（<tool_call> 内单行/多行严格 JSON）。
-  # 须合法 JSON（双引号、字符串内换行用 \\n），否则 vLLM 解析失败；客户端仍可对未识别块做回退解析。
-  tool_call_parser: hermes
+  # 工具调用解析：Qwen3.5 与 qwen3_xml（<function=…><parameter=…>）。勿用 hermes：会对 XML 做 JSON 解析并报错。
+  # 若 vLLM 日志仍出现 hermes_tool_parser.py，说明进程不是用当前配置起的——杀进程后重跑 start_server.sh，或 export VLLM_TOOL_CALL_PARSER=qwen3_xml
+  tool_call_parser: qwen3_xml
 
 # TensorRT-LLM 1.2.x — 仅在使用 --engine tensorrt_llm 时生效；venv: setup_trtllm.sh
 tensorrt_llm:
