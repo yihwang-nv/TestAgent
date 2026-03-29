@@ -59,11 +59,13 @@ else
     echo "  WARNING: Could not confirm TensorRT-LLM version — check install."
 fi
 
-# ── 4. Patch tokenizer (idempotent, safe to re-run) ───────────────────────────
+# ── 4. Patch model files (idempotent, safe to re-run) ────────────────────────
 echo ""
-echo "[4/4] Patching tokenizer files..."
-python "$PROJECT_DIR/fix_tokenizer.py" && echo "  Done." \
-    || echo "  Skipped (model not yet downloaded — run python download_model.py)"
+echo "[4/4] Patching model files (tokenizer + config)..."
+python "$PROJECT_DIR/fix_tokenizer.py" && echo "  Tokenizer: Done." \
+    || echo "  Tokenizer: Skipped (model not yet downloaded — run python download_model.py)"
+python "$PROJECT_DIR/fix_config.py" && echo "  Config: Done." \
+    || echo "  Config: Skipped."
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
@@ -72,8 +74,7 @@ echo " TensorRT-LLM setup complete!"
 echo "======================================================"
 echo ""
 echo " Next steps:"
-echo "   bash start_trtllm_server.sh            # build engine + start server"
-echo "   bash start_trtllm_server.sh --build-only   # pre-build engine only"
+echo "   bash start_trtllm_server.sh            # start server"
 echo "   bash start_agent.sh --port 8080        # agent REPL (new terminal)"
 echo ""
 echo " Quantization (override in config.yaml → tensorrt_llm.quantization):"
