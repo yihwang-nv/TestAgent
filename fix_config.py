@@ -1,28 +1,30 @@
 #!/usr/bin/env python3
 """
-fix_config.py — Patch the model's config.json for TensorRT-LLM compatibility.
+fix_config.py — Prepare a TensorRT-LLM-compatible model directory.
 
-The uploaded checkpoint uses model_type "qwen3_5" (Qwen3.5 VLM wrapper) with
-the real model config nested inside "text_config".  Neither transformers 4.57
-nor TRT-LLM recognise "qwen3_5" directly.
+The original checkpoint uses model_type "qwen3_5" (Qwen3.5 VLM wrapper).
+vLLM 0.18+ handles this natively — the original model dir is left untouched.
 
-The text backbone is architecturally identical to "qwen3_next" (same hybrid
-linear/full-attention design, same field names).  TRT-LLM ships
-modeling_qwen3_next.py which supports this architecture natively.
+TensorRT-LLM needs two things:
+  1. model_type = "qwen3_next" (the text backbone architecture)
+  2. Weights remapped: model.language_model.X → model.X
+     (drop vision weights model.visual.*, keep mtp.*, lm_head.*)
 
-This script:
-  1. Reads config.json
-  2. Promotes "text_config" fields to the top level
-  3. Sets model_type = "qwen3_next", architectures = ["Qwen3NextForCausalLM"]
-  4. Extracts rope_theta from the nested rope_parameters dict
-  5. Removes VLM-only fields (vision_config, image/video token ids, etc.)
-  6. Writes the patched config back (idempotent — skips if already patched)
+This script creates a NEW directory alongside the original:
+  <original_dir>-trtllm/
+    config.json          — patched (qwen3_next, flattened)
+    tokenizer*.json      — symlinked from original
+    model.safetensors.*  — remapped safetensors shards (text-only keys)
 
-Run once after downloading the model, or re-run safely at any time.
+Run once before starting the TRT-LLM server.  Safe to re-run (idempotent).
+Expected runtime: 5–15 min (IO-bound, depends on storage speed).
 """
 
 import json
+import os
 import shutil
+import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -31,106 +33,190 @@ PROJECT = Path(__file__).parent
 CONFIG  = PROJECT / "config.yaml"
 
 
-def _model_dir() -> Path:
+def _model_dirs() -> tuple[Path, Path]:
     c = yaml.safe_load(CONFIG.read_text())
-    return Path(c["model"]["local_dir"])
+    orig = Path(c["model"]["local_dir"])
+    trtllm = orig.parent / (orig.name + "-trtllm")
+    return orig, trtllm
 
 
-# Fields to drop from the VLM wrapper (not meaningful for text-only inference)
+# ── Config patch (same logic as before, now writes to trtllm_dir) ─────────────
+
 _VLM_FIELDS = {
-    "vision_config",
-    "image_token_id",
-    "video_token_id",
-    "vision_start_token_id",
-    "vision_end_token_id",
-    "processor_config",
-    "model_name",          # informal name field, can confuse loaders
+    "vision_config", "image_token_id", "video_token_id",
+    "vision_start_token_id", "vision_end_token_id",
+    "processor_config", "model_name",
 }
-
-# Fields to strip from text_config that we don't want to carry over
-# (bos_token_id is None in text_config; we use the outer eos/pad)
 _TEXT_STRIP = {"model_type"}
 
 
-def patch_config(model_dir: Path) -> bool:
-    """
-    Patch config.json in-place.  Returns True if a patch was applied,
-    False if it was already patched (idempotent).
-    """
-    cfg_path = model_dir / "config.json"
-    if not cfg_path.exists():
-        print(f"  fix_config: config.json not found at {cfg_path} — skipping.")
-        return False
-
-    cfg = json.loads(cfg_path.read_text())
-
-    if cfg.get("model_type") == "qwen3_next":
-        print("  fix_config: config.json already patched (model_type=qwen3_next) — skipping.")
-        return False
+def _make_trtllm_config(orig_dir: Path, trtllm_dir: Path):
+    cfg = json.loads((orig_dir / "config.json").read_text())
 
     if cfg.get("model_type") != "qwen3_5":
         mt = cfg.get("model_type", "<missing>")
-        print(f"  fix_config: unexpected model_type '{mt}' — skipping (only handles qwen3_5).")
+        print(f"  fix_config: unexpected model_type '{mt}' — only handles qwen3_5.")
         return False
 
     text = cfg.get("text_config", {})
     if not text:
-        print("  fix_config: no text_config found — skipping.")
+        print("  fix_config: no text_config in config.json — cannot patch.")
         return False
 
-    # ── Back up the original ──────────────────────────────────────────────────
-    bak = cfg_path.with_suffix(".json.bak")
-    if not bak.exists():
-        shutil.copy2(cfg_path, bak)
-        print(f"  fix_config: original backed up to {bak.name}")
-
-    # ── Build the patched config ──────────────────────────────────────────────
     new_cfg: dict = {}
-
-    # 1. Promote text_config fields (drop model_type — we set it explicitly)
     for k, v in text.items():
         if k not in _TEXT_STRIP:
             new_cfg[k] = v
 
-    # 2. Extract rope_theta from nested rope_parameters dict
     rope_params = text.get("rope_parameters", {})
     if isinstance(rope_params, dict) and "rope_theta" in rope_params:
         new_cfg["rope_theta"] = rope_params["rope_theta"]
-    # partial_rotary_factor already promoted from text_config above
-
-    # Remove the nested rope_parameters dict (qwen3_next uses flat fields)
     new_cfg.pop("rope_parameters", None)
 
-    # 3. Merge outer token IDs (prefer outer eos/pad over text_config nulls)
     for field in ("bos_token_id", "eos_token_id", "pad_token_id"):
         outer_val = cfg.get(field)
         if outer_val is not None:
             new_cfg[field] = outer_val
 
-    # 4. Carry over any remaining outer-level fields that aren't VLM-only
     for k, v in cfg.items():
         if k in _VLM_FIELDS or k == "text_config":
             continue
-        if k not in new_cfg:          # don't overwrite text_config values
+        if k not in new_cfg:
             new_cfg[k] = v
 
-    # 5. Set the patched identifiers
     new_cfg["model_type"]    = "qwen3_next"
     new_cfg["architectures"] = ["Qwen3NextForCausalLM"]
 
-    # ── Write ─────────────────────────────────────────────────────────────────
-    cfg_path.write_text(json.dumps(new_cfg, indent=2) + "\n")
-    print("  fix_config: config.json patched  "
-          "(qwen3_5 → qwen3_next / Qwen3NextForCausalLM)")
+    (trtllm_dir / "config.json").write_text(json.dumps(new_cfg, indent=2) + "\n")
+    print("  fix_config: config.json written (qwen3_5 → qwen3_next).")
     return True
 
 
+# ── Weight remap ──────────────────────────────────────────────────────────────
+
+def _remap_weights(orig_dir: Path, trtllm_dir: Path):
+    """
+    Load each safetensors shard, drop model.visual.* keys, remap
+    model.language_model.X → model.X, write to trtllm_dir.
+    """
+    try:
+        from safetensors import safe_open
+        from safetensors.torch import save_file
+    except ImportError:
+        print("  fix_config: safetensors not installed — pip install safetensors")
+        sys.exit(1)
+
+    import torch
+
+    idx_path = orig_dir / "model.safetensors.index.json"
+    if not idx_path.exists():
+        print("  fix_config: model.safetensors.index.json not found.")
+        sys.exit(1)
+
+    idx = json.loads(idx_path.read_text())
+    weight_map = idx["weight_map"]
+
+    # Determine shard files
+    shards = sorted(set(weight_map.values()))
+    print(f"  fix_config: remapping {len(shards)} shard(s) …")
+
+    new_weight_map = {}
+    t0 = time.time()
+
+    for shard_file in shards:
+        src = orig_dir / shard_file
+        dst = trtllm_dir / shard_file
+        print(f"    {shard_file} …", flush=True)
+
+        tensors: dict[str, torch.Tensor] = {}
+        with safe_open(str(src), framework="pt", device="cpu") as f:
+            for key in f.keys():
+                # Drop vision weights — not needed for text inference
+                if key.startswith("model.visual."):
+                    continue
+                # Remap: model.language_model.X → model.X
+                if key.startswith("model.language_model."):
+                    new_key = "model." + key[len("model.language_model."):]
+                else:
+                    new_key = key
+                tensors[new_key] = f.get_tensor(key)
+
+        save_file(tensors, str(dst))
+        for new_key in tensors:
+            new_weight_map[new_key] = shard_file
+
+    # Write updated index
+    new_idx = {
+        "metadata": idx.get("metadata", {}),
+        "weight_map": new_weight_map,
+    }
+    (trtllm_dir / "model.safetensors.index.json").write_text(
+        json.dumps(new_idx, indent=2) + "\n"
+    )
+
+    elapsed = time.time() - t0
+    print(f"  fix_config: weights remapped in {elapsed/60:.1f} min.")
+
+
+# ── Symlink tokenizer files ───────────────────────────────────────────────────
+
+_TOKENIZER_FILES = [
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "tokenizer.model",
+]
+
+
+def _link_tokenizer(orig_dir: Path, trtllm_dir: Path):
+    for fname in _TOKENIZER_FILES:
+        src = orig_dir / fname
+        dst = trtllm_dir / fname
+        if src.exists() and not dst.exists():
+            os.symlink(src, dst)
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 def main():
-    model_dir = _model_dir()
-    if not model_dir.is_dir():
-        print(f"  fix_config: model not yet downloaded at {model_dir} — skipping.")
+    orig_dir, trtllm_dir = _model_dirs()
+
+    if not orig_dir.is_dir():
+        print(f"  fix_config: model not found at {orig_dir} — run download_model.py first.")
         return
-    patch_config(model_dir)
+
+    if trtllm_dir.exists() and (trtllm_dir / "config.json").exists():
+        # Check if already the right type
+        existing = json.loads((trtllm_dir / "config.json").read_text())
+        if existing.get("model_type") == "qwen3_next":
+            print(f"  fix_config: TRT-LLM model dir already prepared at {trtllm_dir} — skipping.")
+            return
+
+    print(f"  fix_config: preparing TRT-LLM model dir at {trtllm_dir} …")
+    trtllm_dir.mkdir(parents=True, exist_ok=True)
+
+    ok = _make_trtllm_config(orig_dir, trtllm_dir)
+    if not ok:
+        return
+
+    _link_tokenizer(orig_dir, trtllm_dir)
+
+    # Check if weights already remapped
+    idx_dst = trtllm_dir / "model.safetensors.index.json"
+    if not idx_dst.exists():
+        print(f"  fix_config: remapping weights (one-time, ~5–15 min) …")
+        _remap_weights(orig_dir, trtllm_dir)
+    else:
+        print("  fix_config: weights already remapped — skipping.")
+
+    print(f"  fix_config: done. TRT-LLM model dir: {trtllm_dir}")
+
+    # Print config.yaml update hint
+    tc = yaml.safe_load(CONFIG.read_text()).get("tensorrt_llm", {})
+    if not tc.get("model_dir"):
+        print()
+        print("  NOTE: add this to config.yaml → tensorrt_llm section to use the remapped dir:")
+        print(f"    model_dir: \"{trtllm_dir}\"")
 
 
 if __name__ == "__main__":

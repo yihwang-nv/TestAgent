@@ -103,15 +103,27 @@ def load_model(c: dict, quant: str) -> tuple["LLM", AutoTokenizer]:
         sys.exit("ERROR: tensorrt_llm is not installed.\n"
                  "       pip install tensorrt-llm")
 
-    model_dir = Path(c["model"]["local_dir"])
     tc        = c.get("tensorrt_llm", {})
     dtype     = c["model"].get("torch_dtype", "bfloat16")
     tp_size   = tc.get("tensor_parallel_size", 1)
     quant_cfg = _quant_config(quant)
 
+    # TRT-LLM needs a remapped model dir (model.language_model.* → model.*).
+    # fix_config.py creates <local_dir>-trtllm/ for this purpose.
+    # Use tensorrt_llm.model_dir if set, otherwise derive the default.
+    trtllm_model_dir = tc.get("model_dir")
+    if trtllm_model_dir:
+        model_dir = Path(trtllm_model_dir)
+    else:
+        orig = Path(c["model"]["local_dir"])
+        model_dir = orig.parent / (orig.name + "-trtllm")
+
     if not model_dir.is_dir():
-        sys.exit(f"ERROR: HF model not found at {model_dir}\n"
-                 "       Run: python download_model.py")
+        sys.exit(
+            f"ERROR: TRT-LLM model dir not found at {model_dir}\n"
+            "       Run: python fix_config.py   (creates remapped checkpoint)\n"
+            "       Or set tensorrt_llm.model_dir in config.yaml"
+        )
 
     log.info("Loading model (PyTorch backend): %s", model_dir)
     log.info("  dtype : %s  quant : %s  TP : %d", dtype, quant, tp_size)

@@ -43,16 +43,18 @@ source "$VENV_DIR/bin/activate"
 pip install --upgrade pip wheel
 
 # ── 3. Install vLLM + project dependencies ────────────────────────────────────
-# NOTE: vLLM bundles its own torch, transformers, fastapi, uvicorn.
-#       Do NOT install torch separately — it will cause version conflicts.
+# vLLM 0.18.0 requires torch==2.10.0. If a different torch is already
+# installed (e.g., 2.9.1+cu130), uninstall it first so pip pulls in the
+# correct version — mismatched ABI causes _C.abi3.so symbol errors.
 echo ""
 echo "[3/4] Installing vLLM and dependencies..."
 echo "  (vLLM is large — first install may take a few minutes)"
 
-# Check if we're on a Blackwell GPU (sm_100) — needs vLLM >= 0.6
-GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
-if echo "$GPU_NAME" | grep -qiE "RTX (50|PRO 6000 Blackwell)"; then
-    echo "  Detected Blackwell GPU ($GPU_NAME) — ensuring vLLM >= 0.6.0"
+# Remove any pre-existing torch that might conflict with vLLM's pinned version
+TORCH_VER=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || true)
+if [[ -n "$TORCH_VER" && "$TORCH_VER" != "2.10."* ]]; then
+    echo "  Found torch $TORCH_VER — uninstalling to let vLLM pin the correct version..."
+    pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
 fi
 
 pip install -r "$PROJECT_DIR/requirements.txt"
