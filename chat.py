@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Interactive CLI chat with Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled.
-Uses transformers + bitsandbytes quantization for RTX 5070 (12 GB VRAM).
-Model produces <think>...</think> reasoning blocks before final answers.
+Interactive CLI chat with a local causal LM from config.yaml (transformers + optional bitsandbytes).
+Model may emit vendor-specific reasoning blocks before final answers, depending on the checkpoint.
 """
 
 import sys
@@ -58,26 +57,34 @@ def main(
         help="Show or hide <think> reasoning blocks"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
-    cfg        = load_config()
-    model_cfg  = cfg["model"]
-    gen_cfg    = cfg["generation"]
+    cfg         = load_config()
+    size_key    = cfg.get("chat_model_size", "4b")
+    models      = cfg.get("models") or {}
+    if size_key not in models:
+        app.print(f"[red]chat_model_size {size_key!r} not in config models[/red]")
+        raise typer.Exit(1)
+    model_entry = dict(models[size_key])
+    defaults    = cfg.get("model_defaults") or {}
+    gen_cfg     = cfg["generation"]
 
-    quantization = quant or model_cfg.get("quantization", "4bit")
-    torch_dtype  = getattr(torch, model_cfg.get("torch_dtype", "bfloat16"))
-    model_dir    = PROJECT / model_cfg["local_dir"]
+    ld = model_entry.get("local_dir", "")
+    model_dir = PROJECT / ld if not Path(ld).is_absolute() else Path(ld)
+
+    quantization = quant or model_entry.get("quantization", "4bit")
+    torch_dtype  = getattr(torch, model_entry.get("torch_dtype", defaults.get("torch_dtype", "bfloat16")))
 
     if not model_dir.exists() or not any(model_dir.glob("*.safetensors")):
         app.print(f"[red]Model not found:[/red] {model_dir}")
-        app.print("Run [bold]python download_model.py[/bold] first.")
+        app.print("Run [bold]python download_model.py --model-size <size>[/bold] first.")
         raise typer.Exit(1)
 
     vram_hint = QUANT_VRAM.get(quantization, "?")
     app.print(Panel(
-        f"[bold cyan]Qwen3.5-9B · Claude-4.6-Opus Reasoning Distilled[/bold cyan]\n"
+        f"[bold cyan]Qwen3.5 ({size_key}) · Reasoning Distilled[/bold cyan]\n"
         f"Quantization: [yellow]{quantization}[/yellow] ({vram_hint} VRAM) • "
-        f"dtype: [yellow]{model_cfg.get('torch_dtype', 'bfloat16')}[/yellow]\n"
+        f"dtype: [yellow]{model_entry.get('torch_dtype', defaults.get('torch_dtype', 'bfloat16'))}[/yellow]\n"
         f"[dim]{model_dir.name}[/dim]",
-        title="[bold]Qwen3.5-9B × RTX 5070[/bold]",
+        title="[bold]Local chat (transformers)[/bold]",
     ))
 
     app.print("[dim]Loading model...[/dim]")
@@ -87,7 +94,7 @@ def main(
 
     load_kwargs = dict(
         pretrained_model_name_or_path=str(model_dir),
-        device_map=model_cfg.get("device_map", "auto"),
+        device_map=model_entry.get("device_map", "auto"),
         torch_dtype=torch_dtype if quantization == "none" else None,
         quantization_config=bnb_config,
         trust_remote_code=True,

@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
 # =============================================================================
 # setup.sh — Full project setup
-# Run once before anything else.
-# Usage: bash setup.sh [--skip-download]
+# Usage: bash setup.sh [--skip-download] [--model-size auto|0.8b|2b|4b|9b|27b|35b-a3b|all]
 # =============================================================================
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$PROJECT_DIR/.venv"
 SKIP_DOWNLOAD=false
-[[ "${1:-}" == "--skip-download" ]] && SKIP_DOWNLOAD=true
+MODEL_SIZE="auto"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --skip-download) SKIP_DOWNLOAD=true; shift ;;
+        --model-size)    MODEL_SIZE="$2"; shift 2 ;;
+        *)               echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
 
 echo "======================================================"
-echo " Qwen3.5-9B Reasoning Distilled — Project Setup"
-echo " Inference engine: vLLM"
+echo " Qwen3.5 Reasoning Distilled — Project Setup"
+echo " Inference: vLLM"
 echo " Workspace: $PROJECT_DIR"
 echo "======================================================"
 
-# ── 1. GPU check ──────────────────────────────────────────────────────────────
 echo ""
 echo "[1/4] Checking GPU..."
 if ! command -v nvidia-smi &>/dev/null; then
@@ -26,11 +32,9 @@ if ! command -v nvidia-smi &>/dev/null; then
 fi
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader \
     | awk '{print "  GPU: "$0}'
-
 CUDA_VER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
 echo "  Driver: $CUDA_VER"
 
-# ── 2. Python venv ────────────────────────────────────────────────────────────
 echo ""
 echo "[2/4] Setting up Python virtual environment..."
 if [[ -d "$VENV_DIR" ]]; then
@@ -42,60 +46,63 @@ fi
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip wheel
 
-# ── 3. Install vLLM + project dependencies ────────────────────────────────────
-# vLLM 0.18.0 requires torch==2.10.0. If a different torch is already
-# installed (e.g., 2.9.1+cu130), uninstall it first so pip pulls in the
-# correct version — mismatched ABI causes _C.abi3.so symbol errors.
 echo ""
 echo "[3/4] Installing vLLM and dependencies..."
-echo "  (vLLM is large — first install may take a few minutes)"
-
-# Remove any pre-existing torch that might conflict with vLLM's pinned version
 TORCH_VER=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || true)
 if [[ -n "$TORCH_VER" && "$TORCH_VER" != "2.10."* ]]; then
     echo "  Found torch $TORCH_VER — uninstalling to let vLLM pin the correct version..."
     pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
 fi
-
-pip install -r "$PROJECT_DIR/requirements.txt"
+pip install -r "$PROJECT_DIR/requirements.txt" --extra-index-url https://pypi.nvidia.com
 echo "  Done."
-
-# Verify vllm installed
 python -c "import vllm; print(f'  vLLM {vllm.__version__} installed')"
 
-# ── 4. Download model ─────────────────────────────────────────────────────────
 echo ""
 if $SKIP_DOWNLOAD; then
-    echo "[4/4] Skipping model download (--skip-download passed)."
-    echo "      Run manually: python download_model.py"
+    echo "[4/4] Skipping model download (--skip-download)."
+    echo "      Run: python download_model.py --model-size auto|SIZE|all"
 else
-    echo "[4/4] Downloading model (~19 GB — Ctrl-C to skip and do it later)..."
-    python "$PROJECT_DIR/download_model.py" || {
+    echo "[4/4] Downloading model (Ctrl-C to skip)..."
+    python "$PROJECT_DIR/download_model.py" --model-size "$MODEL_SIZE" || {
         echo ""
         echo "  Download interrupted or failed."
-        echo "  Resume later with: python download_model.py"
+        echo "  Resume: python download_model.py --model-size $MODEL_SIZE"
     }
 fi
 
-# ── 4b. Patch tokenizer_config.json ──────────────────────────────────────────
-# The uploaded model has "tokenizer_class": "TokenizersBackend" which doesn't
-# exist in transformers. Patch it to "PreTrainedTokenizerFast" (correct class).
 echo ""
-echo "[4b] Patching tokenizer_config.json..."
-python "$PROJECT_DIR/fix_tokenizer.py" && echo "  Done." || echo "  Skipped (model not yet downloaded)."
+echo "[4b] Patching tokenizer_config.json under models/..."
+python - "$PROJECT_DIR" <<'PYEOF'
+import json
+import sys
+from pathlib import Path
 
-# ── Done ──────────────────────────────────────────────────────────────────────
+root = Path(sys.argv[1]) / "models"
+if not root.is_dir():
+    print("  No models/ directory yet — skipped.")
+    raise SystemExit(0)
+
+patched = 0
+for tok_cfg in root.glob("*/tokenizer_config.json"):
+    data = json.loads(tok_cfg.read_text())
+    old_cls = data.get("tokenizer_class", "")
+    if old_cls in ("TokenizersBackend", ""):
+        data["tokenizer_class"] = "Qwen2TokenizerFast"
+        tok_cfg.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        print(f"  Patched {tok_cfg.parent.name}: tokenizer_class -> Qwen2TokenizerFast")
+        patched += 1
+    else:
+        print(f"  OK {tok_cfg.parent.name}: {old_cls!r}")
+if patched == 0 and not list(root.glob("*/tokenizer_config.json")):
+    print("  No tokenizer_config.json found (models not downloaded).")
+PYEOF
+echo "  Done."
+
 echo ""
 echo "======================================================"
 echo " Setup complete!"
 echo "======================================================"
 echo ""
-echo " Next:"
-echo "   bash start_server.sh        # start vLLM inference server"
-echo "   bash start_agent.sh         # start agent REPL (new terminal)"
-echo ""
-echo " Quantization options (edit config.yaml → model.quantization):"
-echo "   none  ~19 GB VRAM  ← default (full bf16, best quality)"
-echo "   8bit  ~10 GB VRAM  (bitsandbytes, --quant 8bit)"
-echo "   awq   ~5  GB VRAM  (needs pre-quantized AWQ model variant)"
+echo "  bash start_server.sh [--model-size auto] [--quant auto]"
+echo "  python download_model.py --model-size all   # all sizes"
 echo ""

@@ -37,7 +37,7 @@ source "$VENV"
 echo "Waiting for server at $SERVER_URL ..."
 for i in $(seq 1 30); do
     if curl -sf "$SERVER_URL/health" > /dev/null 2>&1; then
-        MODEL=$(curl -s "$SERVER_URL/health" | python -c "import sys,json; print(json.load(sys.stdin).get('model','?'))")
+        MODEL=$(curl -s "$SERVER_URL/v1/models" | python -c "import sys,json; d=json.load(sys.stdin); print(d['data'][0]['id'] if d.get('data') else '?')" 2>/dev/null || echo "ready")
         echo "Server ready — model: $MODEL"
         break
     fi

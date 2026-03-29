@@ -1,66 +1,90 @@
-# Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled — RTX PRO 6000 Blackwell (96 GB VRAM)
-# ---------------------------------------------------------------
-# Inference engine: vLLM (PagedAttention, continuous batching)
-# Model is ~19 GB bf16 — fits easily on 96 GB VRAM.
-#
-# Quantization options (only needed on smaller GPUs):
-#   none (bf16): ~19 GB  (best quality)
-#   8bit:        ~10 GB  ← default (bitsandbytes)
-#   awq:         ~5  GB  (needs pre-quantized AWQ variant)
-# ---------------------------------------------------------------
+# Local LLM agent stack: vLLM (default) or TensorRT-LLM; model list under `models:` (Hugging Face repos).
+# vLLM:  bash start_server.sh [--engine vllm] [--quant auto|none|8bit|awq]
+# TRT:   bash start_server.sh --engine tensorrt_llm  （见 setup_trtllm.sh）
+#        Many TRT-LLM wheels pin an older transformers; Qwen3.5-class checkpoints are usually served via vLLM here.
 
-model:
-  hf_repo: "Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled"
-  local_dir: "/home/scratch.yihwang_gpu_1/small_model/models/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled"
+inference:
+  # 默认推理引擎: vllm | tensorrt_llm
+  engine: "vllm"
 
-  # Quantization: "none" | "8bit" | "awq"
-  quantization: "8bit"
-
-  # dtype: bfloat16 is native for Blackwell and preferred
+model_defaults:
   torch_dtype: "bfloat16"
 
+models:
+  "0.8b":
+    hf_repo: "Jackrong/Qwen3.5-0.8B-Claude-4.6-Opus-Reasoning-Distilled"
+    local_dir: "models/Qwen3.5-0.8B-Claude-4.6-Opus-Reasoning-Distilled"
+    size_gb_bf16: 1.6
+    served_model_name: "qwen3.5-0.8b"
+  "2b":
+    hf_repo: "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled"
+    local_dir: "models/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled"
+    size_gb_bf16: 4
+    served_model_name: "qwen3.5-2b"
+  "4b":
+    hf_repo: "Jackrong/Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled"
+    local_dir: "models/Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled"
+    size_gb_bf16: 9
+    served_model_name: "qwen3.5-4b"
+  "9b":
+    hf_repo: "Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled"
+    local_dir: "models/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled"
+    size_gb_bf16: 19
+    served_model_name: "qwen3.5-9b"
+  "27b":
+    hf_repo: "Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled"
+    local_dir: "models/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled"
+    size_gb_bf16: 54
+    served_model_name: "qwen3.5-27b"
+  "35b-a3b":
+    hf_repo: "Jackrong/Qwen3.5-35B-A3B-Claude-4.6-Opus-Reasoning-Distilled"
+    local_dir: "models/Qwen3.5-35B-A3B-Claude-4.6-Opus-Reasoning-Distilled"
+    size_gb_bf16: 70
+    served_model_name: "qwen3.5-35b-a3b"
+
+# chat.py (transformers) uses this key under models:
+chat_model_size: "4b"
+
 vllm:
-  # Max context length (model supports up to 32 768; set lower to save KV cache)
-  max_model_len: 8192
-
-  # Fraction of GPU VRAM to allocate for model + KV cache (0.0–1.0)
-  gpu_memory_utilization: 0.90
-
-  # Number of GPUs for tensor parallelism (1 for single GPU)
+  # 上限；实际长度 = min(本值, gpu_select 按显存档位)。须 ≤ 模型 config.json 的 max_position_embeddings。
+  # 本仓库默认 Qwen3.5 系权重多为 262144；更大时 vLLM 可能拒绝，除非 VLLM_ALLOW_LONG_MAX_MODEL_LEN=1（易数值问题，不推荐）。
+  max_model_len: 262144
+  gpu_memory_utilization: 0.95
   tensor_parallel_size: 1
-
-  # Name exposed on /v1/models
-  served_model_name: "qwen3.5-9b"
-
-  # Trust remote code (required for Qwen3 chat template)
   trust_remote_code: true
+  # 工具调用解析：本项目默认 hermes（<tool_call> 内单行/多行严格 JSON）。
+  # 须合法 JSON（双引号、字符串内换行用 \\n），否则 vLLM 解析失败；客户端仍可对未识别块做回退解析。
+  tool_call_parser: hermes
 
+# TensorRT-LLM 1.2.x — 仅在使用 --engine tensorrt_llm 时生效；venv: setup_trtllm.sh
 tensorrt_llm:
-  # Directory where the compiled TRT-LLM engine is saved/loaded.
-  # Default (if blank): <project>/engines/qwen3.5-9b-<quant>-<dtype>/
-  engine_dir: ""
-
-  # Max sequence length for engine compilation
-  max_seq_len: 8192
-
-  # Max concurrent requests during inference
+  venv_subdir: ".venv_trtllm"
+  # 可选：绝对路径；不设则用 <project>/<venv_subdir>/bin/trtllm-serve
+  # trtllm_serve_path: ""
+  package_version: "1.2.0"
+  backend: "pytorch"
   max_batch_size: 8
-
-  # Number of GPUs for tensor parallelism (1 for single GPU)
-  tensor_parallel_size: 1
-
-  # Quantization for TRT-LLM (independent of vLLM quant above):
-  #   none      — bf16 full precision (~19 GB VRAM)
-  #   int8      — SmoothQuant W8A8   (~10 GB VRAM)  ← default
-  #   int4_awq  — AWQ W4A16          (~5  GB VRAM, fastest)
-  quantization: "int8"
+  # 与 vllm.max_model_len 对齐；勿超过权重支持的长度。
+  max_num_tokens: 262144
+  kv_cache_free_gpu_memory_fraction: 0.9
+  # TRT-LLM 1.2 的 `trtllm-serve serve` 无 --quantization；勿在此填已废弃 CLI。
+  # 真 4bit/量化见官方 ModelOpt / 预量化权重 / engine；高级项用 extra_llm_api_options。
+  quant_4bit_args: []
+  quant_8bit_args: []
+  # 相对项目根目录或绝对路径；传给 trtllm-serve：--extra_llm_api_options
+  # extra_llm_api_options: "trtllm_extra_options.yaml"
+  extra_args: []
+  # 若你的 trtllm-serve 支持暴露自定义 model id，可设为 true 并设置 served_model_name_flag
+  pass_served_model_name: false
+  served_model_name_flag: "--served_model_name"
 
 generation:
-  # Context: capped by vllm.max_model_len above
   max_new_tokens: 2048
-
-  # Qwen3.5 recommended sampling params
   temperature: 0.6
   top_p: 0.95
   top_k: 40
   repetition_penalty: 1.05
+
+anthropic:
+  model: "claude-sonnet-4-20250514"
+  max_tokens: 8192

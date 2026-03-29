@@ -8,7 +8,17 @@ models/
 # Python virtual environment
 venv/
 .venv/
+.venv_trtllm/
 env/
+
+# Local caches / agent state (machine-specific)
+.hf_cache/
+.scratch_rust/
+.agent_history
+.codex_schema_tmp.json
+
+# Vendored trees not part of this repo (optional local drops)
+third_party/
 
 # Python cache
 __pycache__/
@@ -32,3 +42,6 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Claude agent vector KB (Chroma)
+.agent_kb/

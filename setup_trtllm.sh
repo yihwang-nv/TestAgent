@@ -1,84 +1,54 @@
 #!/usr/bin/env bash
 # =============================================================================
-# setup_trtllm.sh — Set up isolated TensorRT-LLM virtual environment
-#
-# Creates .venv-trtllm (separate from .venv which is used by vLLM).
-# Keeping them separate avoids torch ABI conflicts between vLLM and TRT-LLM.
-#
-# Usage: bash setup_trtllm.sh [--skip-download]
+# setup_trtllm.sh — isolated venv for TensorRT-LLM (no vLLM in this env)
+# Usage: bash setup_trtllm.sh
+# Optional: TRTLLM_PIP_SPEC='tensorrt-llm==1.3.0rc9' bash setup_trtllm.sh
+#           (use a 1.3 rc from PyPI + NVIDIA index for Qwen3-Next / newer Qwen3.5 — check NV docs)
 # =============================================================================
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="$PROJECT_DIR/.venv-trtllm"
-SKIP_DOWNLOAD=false
-[[ "${1:-}" == "--skip-download" ]] && SKIP_DOWNLOAD=true
+VENV_DIR="$PROJECT_DIR/.venv_trtllm"
 
 echo "======================================================"
-echo " Qwen3.5-9B — TensorRT-LLM Environment Setup"
-echo " Venv    : $VENV_DIR"
-echo " (separate from .venv used by vLLM)"
+echo " TensorRT-LLM venv: $VENV_DIR"
+echo " (Separate from .venv used by vLLM)"
 echo "======================================================"
 
-# ── 1. GPU check ──────────────────────────────────────────────────────────────
-echo ""
-echo "[1/4] Checking GPU..."
-if ! command -v nvidia-smi &>/dev/null; then
-    echo "  ERROR: nvidia-smi not found. Install NVIDIA drivers first."
-    exit 1
-fi
-nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader \
-    | awk '{print "  GPU: "$0}'
-
-# ── 2. Python venv ────────────────────────────────────────────────────────────
-echo ""
-echo "[2/4] Setting up .venv-trtllm..."
-if [[ -d "$VENV_DIR" ]]; then
-    echo "  Already exists: $VENV_DIR (skipping creation)"
-else
+if [[ ! -d "$VENV_DIR" ]]; then
     python3 -m venv "$VENV_DIR"
-    echo "  Created: $VENV_DIR"
-fi
-source "$VENV_DIR/bin/activate"
-pip install --upgrade pip wheel
-
-# ── 3. Install TensorRT-LLM + server deps ─────────────────────────────────────
-# TRT-LLM bundles its own torch/transformers — do NOT install vLLM here.
-echo ""
-echo "[3/4] Installing TensorRT-LLM and dependencies..."
-echo "  (TRT-LLM is large — first install may take several minutes)"
-pip install -r "$PROJECT_DIR/requirements_trtllm.txt"
-echo "  Done."
-
-# Verify TRT-LLM loaded (use version string check — modelopt causes non-zero exit)
-TRTLLM_VER=$(python -W ignore -c "import tensorrt_llm" 2>&1 \
-    | grep -oP "TensorRT LLM version: \K[^\s]+" || true)
-if [[ -n "$TRTLLM_VER" ]]; then
-    echo "  TensorRT-LLM $TRTLLM_VER installed successfully."
+    echo "Created venv: $VENV_DIR"
 else
-    echo "  WARNING: Could not confirm TensorRT-LLM version — check install."
+    echo "Venv already exists: $VENV_DIR"
+fi
+# shellcheck source=/dev/null
+source "$VENV_DIR/bin/activate"
+pip install -U pip wheel
+NV_INDEX="--extra-index-url https://pypi.nvidia.com"
+if [[ -n "${TRTLLM_PIP_SPEC:-}" ]]; then
+    echo "Installing TensorRT-LLM from TRTLLM_PIP_SPEC: $TRTLLM_PIP_SPEC"
+    pip install "$TRTLLM_PIP_SPEC" "pyyaml>=6.0" $NV_INDEX
+else
+    pip install -r "$PROJECT_DIR/requirements_trtllm.txt" $NV_INDEX
 fi
 
-# ── 4. Patch model files (idempotent, safe to re-run) ────────────────────────
 echo ""
-echo "[4/4] Patching model files (tokenizer + config)..."
-python "$PROJECT_DIR/fix_tokenizer.py" && echo "  Tokenizer: Done." \
-    || echo "  Tokenizer: Skipped (model not yet downloaded — run python download_model.py)"
-python "$PROJECT_DIR/fix_config.py" && echo "  Config: Done." \
-    || echo "  Config: Skipped."
-
-# ── Done ──────────────────────────────────────────────────────────────────────
-echo ""
+TRT_VER=$(python -c "import tensorrt_llm as t; print(getattr(t, '__version__', 'unknown'))" 2>/dev/null) || true
+[[ -z "${TRT_VER:-}" ]] && TRT_VER="unknown"
+echo "tensorrt_llm: $TRT_VER"
+if command -v trtllm-serve &>/dev/null; then
+    echo "trtllm-serve: $(command -v trtllm-serve)"
+else
+    echo "NOTE: trtllm-serve not on PATH — check TensorRT-LLM install / entry points."
+fi
 echo "======================================================"
-echo " TensorRT-LLM setup complete!"
+echo " Done."
+if [[ "$TRT_VER" == 1.2.* ]]; then
+    echo " NOTE: Qwen3.5 (qwen3_5) 需要新版 transformers；当前 1.2 栈钉死 4.57.3 — 此类权重请用 vLLM。"
+elif [[ "$TRT_VER" == 1.3.* ]]; then
+    echo " NOTE: 1.3.x（含 rc9）PyPI 包仍依赖 transformers==4.57.3，qwen3_5 在 TRT 下通常仍不可用；请用 vLLM 跑 Qwen3.5。"
+else
+    echo " NOTE: 官方 tensorrt-llm wheel 多钉 transformers 4.57.3；qwen3_5 请优先 vLLM。qwen3_next 见 NVIDIA recipes。"
+fi
+echo "       若 import 时出现 parakeet / auto_docstring 提示，一般来自 TensorRT-LLM 自带脚本，可忽略。"
 echo "======================================================"
-echo ""
-echo " Next steps:"
-echo "   bash start_trtllm_server.sh            # start server"
-echo "   bash start_agent.sh --port 8080        # agent REPL (new terminal)"
-echo ""
-echo " Quantization (override in config.yaml → tensorrt_llm.quantization):"
-echo "   int8      ~10 GB VRAM  ← default (SmoothQuant)"
-echo "   int4_awq  ~5  GB VRAM  (AWQ, fastest)"
-echo "   none      ~19 GB VRAM  (full bf16)"
-echo ""

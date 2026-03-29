@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Agent that talks directly to the local Qwen3.5-9B inference server.
-No ANTHROPIC_API_KEY required — 100% local.
+Agent that talks to a local OpenAI-compatible inference server (vLLM, etc.).
+No cloud API key required for the default local URL.
 
 Features:
   • Streaming responses with live token display
@@ -33,8 +33,7 @@ SERVER_URL = os.environ.get("LOCAL_MODEL_URL", "http://localhost:8080")
 cli = typer.Typer(add_completion=False)
 
 SYSTEM_PROMPT = (
-    "You are a highly capable AI assistant powered by Qwen3.5-9B, "
-    "distilled from Claude 4.6 Opus reasoning patterns.\n\n"
+    "You are a highly capable AI assistant running on a local model.\n\n"
     "For complex questions, use your <think>...</think> blocks to reason "
     "step-by-step before giving your final answer.\n\n"
     "Be concise, precise, and direct. Show your reasoning when it adds clarity."
@@ -47,10 +46,33 @@ def check_server() -> dict | None:
         with httpx.Client(timeout=4.0) as http:
             r = http.get(f"{SERVER_URL}/health")
             if r.status_code == 200:
-                return r.json()
+                # /health returns empty 200; fetch model name from /v1/models
+                try:
+                    m = http.get(f"{SERVER_URL}/v1/models")
+                    data = m.json()
+                    model_id = data["data"][0]["id"] if data.get("data") else "local"
+                    return {"model": model_id}
+                except Exception:
+                    return {"model": "local"}
     except Exception:
         pass
     return None
+
+
+_served_model_name = None
+
+def _get_model_name() -> str:
+    global _served_model_name
+    if _served_model_name:
+        return _served_model_name
+    try:
+        with httpx.Client(timeout=4.0) as http:
+            r = http.get(f"{SERVER_URL}/v1/models")
+            data = r.json()
+            _served_model_name = data["data"][0]["id"]
+    except Exception:
+        _served_model_name = "qwen3.5-9b"
+    return _served_model_name
 
 
 def stream_chat(
@@ -61,7 +83,7 @@ def stream_chat(
 ):
     """Stream tokens from the local server, yield (token_text, in_think) tuples."""
     payload = {
-        "model":       "qwen3.5-9b-local",
+        "model":       _get_model_name(),
         "messages":    messages,
         "max_tokens":  max_tokens,
         "temperature": temperature,
