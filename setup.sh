@@ -40,7 +40,7 @@ else
     echo "  Created: $VENV_DIR"
 fi
 source "$VENV_DIR/bin/activate"
-pip install --upgrade pip wheel --quiet
+pip install --upgrade pip wheel
 
 # ── 3. Install vLLM + project dependencies ────────────────────────────────────
 # NOTE: vLLM bundles its own torch, transformers, fastapi, uvicorn.
@@ -55,7 +55,7 @@ if echo "$GPU_NAME" | grep -qiE "RTX (50|PRO 6000 Blackwell)"; then
     echo "  Detected Blackwell GPU ($GPU_NAME) — ensuring vLLM >= 0.6.0"
 fi
 
-pip install -r "$PROJECT_DIR/requirements.txt" #--quiet
+pip install -r "$PROJECT_DIR/requirements.txt"
 echo "  Done."
 
 # Verify vllm installed

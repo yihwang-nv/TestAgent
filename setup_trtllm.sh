@@ -40,14 +40,14 @@ else
     echo "  Created: $VENV_DIR"
 fi
 source "$VENV_DIR/bin/activate"
-pip install --upgrade pip wheel --quiet
+pip install --upgrade pip wheel
 
 # ── 3. Install TensorRT-LLM + server deps ─────────────────────────────────────
 # TRT-LLM bundles its own torch/transformers — do NOT install vLLM here.
 echo ""
 echo "[3/4] Installing TensorRT-LLM and dependencies..."
 echo "  (TRT-LLM is large — first install may take several minutes)"
-pip install -r "$PROJECT_DIR/requirements_trtllm.txt" --quiet
+pip install -r "$PROJECT_DIR/requirements_trtllm.txt"
 echo "  Done."
 
 # Verify TRT-LLM loaded (use version string check — modelopt causes non-zero exit)
