@@ -4,8 +4,8 @@
 # Model is ~19 GB bf16 — fits easily on 96 GB VRAM.
 #
 # Quantization options (only needed on smaller GPUs):
-#   none (bf16): ~19 GB  ← default, best quality
-#   8bit:        ~10 GB  (vLLM bitsandbytes)
+#   none (bf16): ~19 GB  (best quality)
+#   8bit:        ~10 GB  ← default (bitsandbytes)
 #   awq:         ~5  GB  (needs pre-quantized AWQ variant)
 # ---------------------------------------------------------------
 
@@ -14,7 +14,7 @@ model:
   local_dir: "/home/scratch.yihwang_gpu_1/small_model/models/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled"
 
   # Quantization: "none" | "8bit" | "awq"
-  quantization: "none"
+  quantization: "8bit"
 
   # dtype: bfloat16 is native for Blackwell and preferred
   torch_dtype: "bfloat16"
@@ -51,9 +51,9 @@ tensorrt_llm:
 
   # Quantization for TRT-LLM (independent of vLLM quant above):
   #   none      — bf16 full precision (~19 GB VRAM)
-  #   int8      — SmoothQuant W8A8   (~10 GB VRAM)
+  #   int8      — SmoothQuant W8A8   (~10 GB VRAM)  ← default
   #   int4_awq  — AWQ W4A16          (~5  GB VRAM, fastest)
-  quantization: "none"
+  quantization: "int8"
 
 generation:
   # Context: capped by vllm.max_model_len above
