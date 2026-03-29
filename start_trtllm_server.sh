@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
 # start_trtllm_server.sh — Start the Qwen3.5-9B TensorRT-LLM inference server
-# Exposes an OpenAI-compatible API on http://0.0.0.0:PORT
+#
+# Uses the TRT-LLM PyTorch backend — loads the HF model directly, no engine
+# compilation required.  Start time is comparable to vLLM.
 #
 # Usage: bash start_trtllm_server.sh [--port 8080] [--quant none|int8|int4_awq]
-#        bash start_trtllm_server.sh --build-only [--quant int8]
-#
-# First run builds the TRT-LLM engine (~15–30 min) and caches it.
-# Subsequent starts load the cached engine in seconds.
 #
 # Endpoints (provided by tensorrt_llm_server.py):
 #   GET  /health
@@ -20,15 +18,13 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="$PROJECT_DIR/.venv-trtllm/bin/activate"
 PORT=8080
 QUANT_OVERRIDE=""
-BUILD_ONLY=false
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --port)       PORT="$2";           shift 2 ;;
-        --quant)      QUANT_OVERRIDE="$2"; shift 2 ;;
-        --build-only) BUILD_ONLY=true;     shift   ;;
-        *)            echo "Unknown arg: $1"; exit 1 ;;
+        --port)  PORT="$2";           shift 2 ;;
+        --quant) QUANT_OVERRIDE="$2"; shift 2 ;;
+        *)       echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
 
@@ -41,9 +37,8 @@ fi
 source "$VENV"
 
 # ── Check tensorrt_llm is installed ──────────────────────────────────────────
-# Use version string detection instead of exit code: modelopt's failed vllm-plugin
-# import emits a non-fatal UserWarning that causes a non-zero exit even though
-# tensorrt_llm itself imported successfully.
+# Use version string detection: modelopt vllm-plugin import failure causes a
+# non-zero exit even though tensorrt_llm itself imported successfully.
 TRTLLM_CHECK=$(python -W ignore -c "import tensorrt_llm" 2>&1 || true)
 TRTLLM_VER=$(echo "$TRTLLM_CHECK" | grep -oP "TensorRT LLM version: \K[^\s]+" || true)
 if [[ -z "$TRTLLM_VER" ]]; then
@@ -65,39 +60,15 @@ tc = c.get("tensorrt_llm", {})
 raw_quant = tc.get("quantization", c["model"].get("quantization", "none"))
 quant_map = {"8bit": "int8", "awq": "int4_awq", "4bit": "int4_awq"}
 quant = quant_map.get(raw_quant, raw_quant)
-
-dtype    = c["model"].get("torch_dtype", "bfloat16")
-max_seq  = str(tc.get("max_seq_len", 8192))
-tp_size  = str(tc.get("tensor_parallel_size", 1))
-eng_dir  = tc.get("engine_dir", "")
 model_dir = c["model"]["local_dir"]
-
-# Resolve engine dir: use config value or derive default
-if not eng_dir:
-    import os
-    eng_dir = os.path.join("$PROJECT_DIR", "engines", f"qwen3.5-9b-{quant}-{dtype}")
-
 print(model_dir)
 print(quant)
-print(dtype)
-print(max_seq)
-print(tp_size)
-print(eng_dir)
 EOF
 }
 
 mapfile -t CFG < <(read_config)
 MODEL_DIR="${CFG[0]}"
 QUANT="${QUANT_OVERRIDE:-${CFG[1]}}"
-DTYPE="${CFG[2]}"
-MAX_SEQ="${CFG[3]}"
-TP_SIZE="${CFG[4]}"
-ENGINE_DIR="${CFG[5]}"
-
-# Recompute engine dir if quant was overridden on CLI
-if [[ -n "$QUANT_OVERRIDE" ]]; then
-    ENGINE_DIR="$PROJECT_DIR/engines/qwen3.5-9b-${QUANT}-${DTYPE}"
-fi
 
 # ── Check model exists ────────────────────────────────────────────────────────
 if [[ ! -d "$MODEL_DIR" ]]; then
@@ -108,36 +79,12 @@ fi
 
 # ── Print summary ─────────────────────────────────────────────────────────────
 echo "======================================================"
-echo " Qwen3.5-9B Inference Server (TensorRT-LLM)"
+echo " Qwen3.5-9B Inference Server (TensorRT-LLM PyTorch)"
 echo " URL     : http://0.0.0.0:$PORT"
 echo " Model   : $MODEL_DIR"
-echo " Engine  : $ENGINE_DIR"
 echo " Quant   : $QUANT"
-echo " dtype   : $DTYPE"
-echo " Context : $MAX_SEQ tokens"
-echo " TP size : $TP_SIZE"
+echo " Backend : PyTorch (no engine compilation)"
 echo "======================================================"
-
-# ── Build engine if not cached ────────────────────────────────────────────────
-if [[ ! -d "$ENGINE_DIR" ]]; then
-    echo ""
-    echo " No cached engine found at $ENGINE_DIR"
-    echo " Building now — this takes 15–30 min on first run."
-    echo " Subsequent starts will load the cached engine in seconds."
-    echo "======================================================"
-    echo ""
-    python "$PROJECT_DIR/build_trtllm_engine.py" --quant "$QUANT"
-else
-    echo " Engine cache : FOUND (skipping build)"
-    echo "======================================================"
-fi
-
-if $BUILD_ONLY; then
-    echo ""
-    echo "Engine built. Run without --build-only to start the server."
-    exit 0
-fi
-
 echo ""
 echo " Endpoints:"
 echo "   GET  /health"

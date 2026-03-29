@@ -1,39 +1,28 @@
 #!/usr/bin/env python3
 """
-tensorrt_llm_server.py — OpenAI-compatible inference server (TensorRT-LLM backend)
+tensorrt_llm_server.py — OpenAI-compatible inference server (TensorRT-LLM PyTorch backend)
 
-TRT-LLM compiles the HF model into a GPU-specific TensorRT engine for maximum
-throughput. The engine is built once and cached to disk; subsequent starts load
-it in seconds.
+Uses the TRT-LLM PyTorch backend, which loads the HF checkpoint directly —
+no engine compilation step required.  Start time is comparable to vLLM.
 
-Workflow:
-  1. (First run) Build engine from HF checkpoint — takes 15–30 min:
-       python tensorrt_llm_server.py --build-only
-     OR let the server auto-build on first start (same time cost).
-
-  2. Start server:
-       python tensorrt_llm_server.py [--port 8080] [--quant none|int8|int4_awq]
-
-  3. Query exactly like the vLLM server — OpenAI-compatible:
-       POST /v1/chat/completions  (streaming + non-streaming)
-       GET  /health
-       GET  /v1/models
-
-Engine cache location:
-  config.yaml → tensorrt_llm.engine_dir
-  Default: <project>/engines/qwen3.5-9b-<quant>-<dtype>/
+Usage:
+  python tensorrt_llm_server.py [--port 8080] [--quant none|int8|int4_awq]
 
 Quantization options:
   none     — bf16 full precision (~19 GB VRAM)
   int8     — SmoothQuant W8A8   (~10 GB VRAM)
   int4_awq — AWQ W4A16          (~5  GB VRAM)  ← fastest
+
+Endpoints (OpenAI-compatible):
+  GET  /health
+  GET  /v1/models
+  POST /v1/chat/completions   (streaming + non-streaming)
 """
 
 import argparse
 import asyncio
 import json
 import logging
-import shutil
 import sys
 import time
 import uuid
@@ -47,8 +36,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from transformers import AutoTokenizer
 
-# ── TRT-LLM imports — try multiple paths; API moved between 0.x and 1.x ──────
-# Install: pip install tensorrt-llm  (requires CUDA ≥ 12.1, driver ≥ 525)
+# ── TRT-LLM imports — PyTorch backend (TRT-LLM 1.x) ─────────────────────────
+# The root-level `LLM` is the PyTorch backend in TRT-LLM 1.x.
+# Do NOT use tensorrt_llm._tensorrt_engine.LLM here — that is the TensorRT
+# backend which requires a separate engine-build step and does not accept
+# the model dir directly.
 _trtllm_import_errors: list[str] = []
 
 try:
@@ -57,17 +49,7 @@ except Exception as e:
     _trtllm_import_errors.append(f"  LLM/SamplingParams: {e}")
     LLM = SamplingParams = None  # type: ignore
 
-# BuildConfig: root package in 1.x, .llm submodule in 0.x
-try:
-    from tensorrt_llm import BuildConfig
-except Exception:
-    try:
-        from tensorrt_llm.llm import BuildConfig
-    except Exception as e:
-        _trtllm_import_errors.append(f"  BuildConfig: {e}")
-        BuildConfig = None  # type: ignore
-
-# QuantConfig / QuantAlgo: .quantization in both; fallback to root
+# QuantConfig / QuantAlgo: .quantization in both versions; fallback to root
 try:
     from tensorrt_llm.quantization import QuantConfig, QuantAlgo
 except Exception:
@@ -77,10 +59,10 @@ except Exception:
         _trtllm_import_errors.append(f"  QuantConfig/QuantAlgo: {e}")
         QuantConfig = QuantAlgo = None  # type: ignore
 
-_TRTLLM_AVAILABLE = (LLM is not None and BuildConfig is not None)
+_TRTLLM_AVAILABLE = LLM is not None
 
-PROJECT    = Path(__file__).parent
-CONFIG     = PROJECT / "config.yaml"
+PROJECT = Path(__file__).parent
+CONFIG  = PROJECT / "config.yaml"
 
 logging.basicConfig(level=logging.INFO, format="[trtllm] %(message)s")
 log = logging.getLogger("trtllm_server")
@@ -97,118 +79,50 @@ def _load_cfg() -> dict:
     return yaml.safe_load(CONFIG.read_text())
 
 
-def _engine_dir(c: dict, quant: str) -> Path:
-    """Return the engine directory for the given quantization setting."""
-    base = c.get("tensorrt_llm", {}).get("engine_dir")
-    if base:
-        return Path(base)
-    dtype = c["model"].get("torch_dtype", "bfloat16")
-    return PROJECT / "engines" / f"qwen3.5-9b-{quant}-{dtype}"
-
-
 def _quant_config(quant: str):
     """Return TRT-LLM QuantConfig for the requested scheme, or None for bf16."""
-    if not _TRTLLM_AVAILABLE or QuantConfig is None or QuantAlgo is None:
+    if QuantConfig is None or QuantAlgo is None:
         if quant in ("int8", "int4_awq"):
             log.warning("QuantConfig unavailable — running without quantization "
                         "(requested: %s)", quant)
         return None
     match quant:
         case "int8":
-            # SmoothQuant — calibrated W8A8, ~10 GB VRAM
             return QuantConfig(quant_algo=QuantAlgo.W8A8_SQ_PER_CHANNEL)
         case "int4_awq":
-            # Activation-Aware Weight Quantization W4A16, ~5 GB VRAM
             return QuantConfig(quant_algo=QuantAlgo.W4A16_AWQ)
-        case "none" | _:
+        case _:
             return None
-
-
-# ── Engine build ──────────────────────────────────────────────────────────────
-
-def build_engine(c: dict, quant: str) -> Path:
-    """
-    Build (or load) a TensorRT-LLM engine from the HF checkpoint.
-
-    If an engine already exists at engine_dir, skip the build and return
-    the cached path immediately.
-
-    Returns the engine directory path.
-    """
-    if not _TRTLLM_AVAILABLE:
-        sys.exit("ERROR: tensorrt_llm is not installed.\n"
-                 "       pip install tensorrt-llm")
-
-    model_dir  = Path(c["model"]["local_dir"])
-    engine_dir = _engine_dir(c, quant)
-    tc         = c.get("tensorrt_llm", {})
-    dtype      = c["model"].get("torch_dtype", "bfloat16")
-    max_seq    = tc.get("max_seq_len", 8192)
-    max_batch  = tc.get("max_batch_size", 8)
-    tp_size    = tc.get("tensor_parallel_size", 1)
-
-    if not model_dir.is_dir():
-        sys.exit(f"ERROR: HF model not found at {model_dir}\n"
-                 "       Run: python download_model.py")
-
-    if engine_dir.exists():
-        log.info("Engine cache found: %s — skipping build.", engine_dir)
-        return engine_dir
-
-    log.info("Building TRT-LLM engine …")
-    log.info("  Source   : %s", model_dir)
-    log.info("  Engine   : %s", engine_dir)
-    log.info("  dtype    : %s", dtype)
-    log.info("  quant    : %s", quant)
-    log.info("  seq_len  : %d", max_seq)
-    log.info("  batch    : %d", max_batch)
-    log.info("  TP       : %d", tp_size)
-    log.info("This will take 15–30 minutes on first run.")
-
-    build_cfg  = BuildConfig(max_seq_len=max_seq, max_batch_size=max_batch)
-    quant_cfg  = _quant_config(quant)
-
-    engine_dir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        tmp_llm = LLM(
-            model=str(model_dir),
-            dtype=dtype,
-            tensor_parallel_size=tp_size,
-            build_config=build_cfg,
-            **({"quant_config": quant_cfg} if quant_cfg else {}),
-        )
-        tmp_llm.save(str(engine_dir))
-        del tmp_llm
-
-    except Exception:
-        # Clean up partial engine dir so next run retries the build
-        shutil.rmtree(engine_dir, ignore_errors=True)
-        raise
-
-    log.info("Engine built and saved to %s", engine_dir)
-    return engine_dir
 
 
 # ── Model load ────────────────────────────────────────────────────────────────
 
 def load_model(c: dict, quant: str) -> tuple["LLM", AutoTokenizer]:
-    """Load a pre-built TRT-LLM engine and the HF tokenizer."""
+    """Load the HF model via TRT-LLM PyTorch backend + HF tokenizer."""
     if not _TRTLLM_AVAILABLE:
         sys.exit("ERROR: tensorrt_llm is not installed.\n"
                  "       pip install tensorrt-llm")
 
-    model_dir  = Path(c["model"]["local_dir"])
-    engine_dir = _engine_dir(c, quant)
-    tc         = c.get("tensorrt_llm", {})
-    tp_size    = tc.get("tensor_parallel_size", 1)
+    model_dir = Path(c["model"]["local_dir"])
+    tc        = c.get("tensorrt_llm", {})
+    dtype     = c["model"].get("torch_dtype", "bfloat16")
+    tp_size   = tc.get("tensor_parallel_size", 1)
+    quant_cfg = _quant_config(quant)
 
-    log.info("Loading engine from %s …", engine_dir)
+    if not model_dir.is_dir():
+        sys.exit(f"ERROR: HF model not found at {model_dir}\n"
+                 "       Run: python download_model.py")
+
+    log.info("Loading model (PyTorch backend): %s", model_dir)
+    log.info("  dtype : %s  quant : %s  TP : %d", dtype, quant, tp_size)
+
     _llm = LLM(
-        model=str(engine_dir),
+        model=str(model_dir),
+        dtype=dtype,
         tensor_parallel_size=tp_size,
+        **( {"quant_config": quant_cfg} if quant_cfg else {} ),
     )
-    log.info("Engine loaded.")
+    log.info("Model loaded.")
 
     log.info("Loading tokenizer from %s …", model_dir)
     _tok = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
@@ -225,13 +139,6 @@ async def lifespan(app: FastAPI):
     cfg   = _load_cfg()
     quant = app.state.quant
 
-    engine_dir = _engine_dir(cfg, quant)
-    if not engine_dir.exists():
-        log.info("No cached engine found — building now (15–30 min)…")
-        await asyncio.get_event_loop().run_in_executor(
-            None, build_engine, cfg, quant
-        )
-
     llm, tokenizer = await asyncio.get_event_loop().run_in_executor(
         None, load_model, cfg, quant
     )
@@ -240,7 +147,7 @@ async def lifespan(app: FastAPI):
     del llm
 
 
-app = FastAPI(title="Qwen3.5-9B TRT-LLM Server")
+app = FastAPI(title="Qwen3.5-9B TRT-LLM Server (PyTorch backend)")
 
 
 # ── Pydantic models (OpenAI-compatible) ───────────────────────────────────────
@@ -251,20 +158,19 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str                       = "qwen3.5-9b"
+    model: str                        = "qwen3.5-9b"
     messages: list[ChatMessage]
-    max_tokens:        Optional[int]   = None
-    temperature:       Optional[float] = None
-    top_p:             Optional[float] = None
-    top_k:             Optional[int]   = None
+    max_tokens:         Optional[int]   = None
+    temperature:        Optional[float] = None
+    top_p:              Optional[float] = None
+    top_k:              Optional[int]   = None
     repetition_penalty: Optional[float] = None
-    stream:            bool            = False
+    stream:             bool            = False
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _apply_template(messages: list[ChatMessage]) -> str:
-    """Apply Qwen3 ChatML template; return a plain text prompt string."""
     msgs = [{"role": m.role, "content": m.content} for m in messages]
     return tokenizer.apply_chat_template(
         msgs,
@@ -276,16 +182,15 @@ def _apply_template(messages: list[ChatMessage]) -> str:
 def _sampling_params(req: ChatCompletionRequest) -> "SamplingParams":
     gen = cfg.get("generation", {})
     return SamplingParams(
-        max_tokens=        req.max_tokens          or gen.get("max_new_tokens",     2048),
-        temperature=       req.temperature         or gen.get("temperature",        0.6),
-        top_p=             req.top_p               or gen.get("top_p",              0.95),
-        top_k=             req.top_k               or gen.get("top_k",              40),
-        repetition_penalty=req.repetition_penalty  or gen.get("repetition_penalty", 1.05),
+        max_tokens=         req.max_tokens         or gen.get("max_new_tokens",     2048),
+        temperature=        req.temperature        or gen.get("temperature",        0.6),
+        top_p=              req.top_p              or gen.get("top_p",              0.95),
+        top_k=              req.top_k              or gen.get("top_k",              40),
+        repetition_penalty= req.repetition_penalty or gen.get("repetition_penalty", 1.05),
     )
 
 
 def _make_chunk(cid: str, content: str, finish: Optional[str] = None) -> str:
-    """Format a single SSE delta chunk."""
     return "data: " + json.dumps({
         "id": cid,
         "object": "chat.completion.chunk",
@@ -306,8 +211,6 @@ async def _stream_tokens(req: ChatCompletionRequest) -> AsyncIterator[str]:
     prompt = _apply_template(req.messages)
     sp     = _sampling_params(req)
 
-    # TRT-LLM HLAPI: generate_async yields RequestOutput objects.
-    # output.outputs[0].text_diff is the incremental token text.
     async for output in llm.generate_async(prompt, streaming=True, sampling_params=sp):
         delta = output.outputs[0].text_diff
         if delta:
@@ -321,11 +224,12 @@ async def _stream_tokens(req: ChatCompletionRequest) -> AsyncIterator[str]:
 
 @app.get("/health")
 def health():
+    c = cfg or {}
     return {
-        "status": "ok",
-        "model": "qwen3.5-9b",
-        "backend": "tensorrt_llm",
-        "engine": str(_engine_dir(cfg, app.state.quant)) if cfg else "loading",
+        "status":  "ok",
+        "model":   "qwen3.5-9b",
+        "backend": "tensorrt_llm_pytorch",
+        "model_dir": c.get("model", {}).get("local_dir", "loading"),
     }
 
 
@@ -334,11 +238,11 @@ def list_models():
     return {
         "object": "list",
         "data": [{
-            "id": "qwen3.5-9b",
-            "object": "model",
-            "created": int(time.time()),
+            "id":       "qwen3.5-9b",
+            "object":   "model",
+            "created":  int(time.time()),
             "owned_by": "local",
-            "backend": "tensorrt_llm",
+            "backend":  "tensorrt_llm_pytorch",
         }],
     }
 
@@ -355,24 +259,24 @@ async def chat_completions(req: ChatCompletionRequest):
         )
 
     # Non-streaming: collect full output
-    prompt = _apply_template(req.messages)
-    sp     = _sampling_params(req)
+    prompt  = _apply_template(req.messages)
+    sp      = _sampling_params(req)
 
     outputs = await asyncio.get_event_loop().run_in_executor(
         None, lambda: llm.generate([prompt], sampling_params=sp)
     )
-    text          = outputs[0].outputs[0].text
+    text             = outputs[0].outputs[0].text
     completion_tokens = len(outputs[0].outputs[0].token_ids)
-    prompt_tokens = len(outputs[0].prompt_token_ids or [])
+    prompt_tokens    = len(outputs[0].prompt_token_ids or [])
 
     return {
-        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-        "object": "chat.completion",
+        "id":      f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "object":  "chat.completion",
         "created": int(time.time()),
-        "model": "qwen3.5-9b",
+        "model":   "qwen3.5-9b",
         "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": text},
+            "index":         0,
+            "message":       {"role": "assistant", "content": text},
             "finish_reason": "stop",
         }],
         "usage": {
@@ -388,14 +292,12 @@ async def chat_completions(req: ChatCompletionRequest):
 def main():
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="TensorRT-LLM inference server")
-    parser.add_argument("--host",       default="0.0.0.0")
-    parser.add_argument("--port",       type=int, default=8080)
-    parser.add_argument("--quant",      default=None,
+    parser = argparse.ArgumentParser(description="TensorRT-LLM PyTorch-backend inference server")
+    parser.add_argument("--host",  default="0.0.0.0")
+    parser.add_argument("--port",  type=int, default=8080)
+    parser.add_argument("--quant", default=None,
                         choices=["none", "int8", "int4_awq"],
                         help="Quantization (overrides config.yaml)")
-    parser.add_argument("--build-only", action="store_true",
-                        help="Build engine and exit without starting server")
     args = parser.parse_args()
 
     if not _TRTLLM_AVAILABLE:
@@ -410,23 +312,14 @@ def main():
     # Normalise: vLLM quant names → TRT-LLM names
     quant = {"8bit": "int8", "awq": "int4_awq", "4bit": "int4_awq"}.get(quant, quant)
 
-    if args.build_only:
-        build_engine(c, quant)
-        return
-
-    engine_dir = _engine_dir(c, quant)
-    if not engine_dir.exists():
-        print(f"[trtllm] No engine at {engine_dir}.")
-        print("[trtllm] Building now — this takes 15–30 min on first run.")
-        build_engine(c, quant)
-
     app.state.quant = quant
     app.router.lifespan_context = lifespan
 
+    model_dir = c["model"]["local_dir"]
     print("=" * 54)
-    print(" Qwen3.5-9B Inference Server (TensorRT-LLM)")
+    print(" Qwen3.5-9B Inference Server (TensorRT-LLM PyTorch)")
     print(f" URL     : http://{args.host}:{args.port}")
-    print(f" Engine  : {_engine_dir(c, quant)}")
+    print(f" Model   : {model_dir}")
     print(f" Quant   : {quant}")
     print("=" * 54)
     print(" Endpoints:")
