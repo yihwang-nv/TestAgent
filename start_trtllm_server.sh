@@ -17,7 +17,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV="$PROJECT_DIR/.venv/bin/activate"
+VENV="$PROJECT_DIR/.venv-trtllm/bin/activate"
 PORT=8080
 QUANT_OVERRIDE=""
 BUILD_ONLY=false
@@ -34,7 +34,8 @@ done
 
 # ── Check venv ────────────────────────────────────────────────────────────────
 if [[ ! -f "$VENV" ]]; then
-    echo "ERROR: Virtual environment not found. Run setup.sh first."
+    echo "ERROR: TRT-LLM virtual environment not found."
+    echo "       Run: bash setup_trtllm.sh"
     exit 1
 fi
 source "$VENV"
