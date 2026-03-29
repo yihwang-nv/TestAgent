@@ -40,12 +40,19 @@ fi
 source "$VENV"
 
 # ── Check tensorrt_llm is installed ──────────────────────────────────────────
-if ! python -c "import tensorrt_llm" &>/dev/null; then
-    echo "ERROR: tensorrt_llm is not installed."
+# Use version string detection instead of exit code: modelopt's failed vllm-plugin
+# import emits a non-fatal UserWarning that causes a non-zero exit even though
+# tensorrt_llm itself imported successfully.
+TRTLLM_CHECK=$(python -W ignore -c "import tensorrt_llm" 2>&1 || true)
+TRTLLM_VER=$(echo "$TRTLLM_CHECK" | grep -oP "TensorRT LLM version: \K[^\s]+" || true)
+if [[ -z "$TRTLLM_VER" ]]; then
+    echo "ERROR: tensorrt_llm is not installed or failed to import."
     echo "       pip install tensorrt-llm"
     echo "       (requires CUDA >= 12.1, driver >= 525)"
+    echo "       Import output: $TRTLLM_CHECK"
     exit 1
 fi
+echo "  TensorRT-LLM $TRTLLM_VER detected."
 
 # ── Read config ───────────────────────────────────────────────────────────────
 read_config() {

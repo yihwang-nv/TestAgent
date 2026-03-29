@@ -55,7 +55,10 @@ try:
     from tensorrt_llm.llm import BuildConfig
     from tensorrt_llm.quantization import QuantConfig, QuantAlgo
     _TRTLLM_AVAILABLE = True
-except ImportError:
+except (ImportError, Exception):
+    # Catch broad Exception: modelopt's vllm-plugin import failure raises a
+    # non-fatal UserWarning at import time but the actual TRT-LLM classes may
+    # still be available. If the specific classes above fail, mark unavailable.
     _TRTLLM_AVAILABLE = False
 
 PROJECT    = Path(__file__).parent

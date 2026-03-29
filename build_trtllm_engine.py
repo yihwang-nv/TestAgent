@@ -31,7 +31,7 @@ try:
     from tensorrt_llm import LLM
     from tensorrt_llm.llm import BuildConfig
     from tensorrt_llm.quantization import QuantConfig, QuantAlgo
-except ImportError:
+except (ImportError, Exception):
     sys.exit(
         "ERROR: tensorrt_llm is not installed.\n"
         "       pip install tensorrt-llm\n"
